@@ -48,3 +48,45 @@ python -m pip install -U pip
 
 
 pip install -r requirements.txt
+
+**##  .env file **
+
+FLASK_ENV=production
+HOST=127.0.0.1
+PORT=8000
+DEBUG=false
+
+DATABASE_URL=postgresql+psycopg2://postgres:password@172.20.48.1:5432/asag_engine_cs
+AUTO_CREATE_TABLES=true
+
+# mindnlp | pangu
+LLM_PROVIDER=mindnlp
+
+# Smaller model for stability
+MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
+
+# Tokens needed for grading JSON
+MAX_NEW_TOKENS=256
+
+# MindSpore execution mode
+# GRAPH_MODE = faster but heavy memory
+# PYNATIVE_MODE = safer for development
+
+MS_MODE=PYNATIVE_MODE
+
+# Uploads
+
+UPLOAD_DIR=data/uploads
+
+# Paper / Markscheme parsing
+Chunk sizes (characters)
+
+PAPER_CHUNK_SIZE=12000
+PAPER_CHUNK_OVERLAP=800
+
+MS_CHUNK_SIZE=14000
+MS_CHUNK_OVERLAP=800
+
+# Curriculum Alignment
+
+ALIGN_BATCH_SIZE=5
