@@ -1,8 +1,7 @@
 __all__ = [
     "app",
-    "health_routes",
-    "papers_routes",
-    "questions_routes",
+    "dev_routes",
     "grading_routes",
-    "submissions_routes",
+    "health_routes",
+    "llm_routes",
 ]

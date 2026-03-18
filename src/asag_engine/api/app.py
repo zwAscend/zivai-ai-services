@@ -3,11 +3,10 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 from asag_engine.db import init_db
 
-from .health_routes import bp as health_bp
-from .papers_routes import bp as papers_bp
-from .questions_routes import bp as questions_bp
+from .dev_routes import bp as dev_bp
 from .grading_routes import bp as grading_bp
-from .submissions_routes import bp as submissions_bp
+from .health_routes import bp as health_bp
+from .llm_routes import bp as llm_bp
 
 
 load_dotenv()
@@ -18,30 +17,30 @@ def create_app() -> Flask:
     auto_create = os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true"
     init_db(auto_create=auto_create)
 
+    app.register_blueprint(dev_bp)
     app.register_blueprint(health_bp)
-    app.register_blueprint(papers_bp)
-    app.register_blueprint(questions_bp)
     app.register_blueprint(grading_bp)
-    app.register_blueprint(submissions_bp)
+    app.register_blueprint(llm_bp)
 
     @app.get("/")
     def root():
         return jsonify({
-            "name": "ASAG Engine Option A (MindNLP/Pangu) + Paper Upload",
+            "name": "ZivAI AI Services Engine (MindSpore/MindNLP)",
             "status": "ok",
+            "mode": "shared-schema rebuild",
             "endpoints": [
                 "/api/v1/health",
-                "/api/v1/papers/upload [POST multipart]",
-                "/api/v1/papers [GET]",
-                "/api/v1/papers/<id> [GET]",
-                "/api/v1/questions [POST,GET]",
-                "/api/v1/questions/<id> [GET]",
-                "/api/v1/questions/<id>/rubric [GET]",
-                "/api/v1/grade [POST]",
-                "/api/v1/submissions [GET]",
-                "/api/v1/submissions/<id> [GET]",
-                "/api/v1/submissions/<id>/override [PATCH]"
-            ]
+                "/api/v1/dev/bootstrap-grading-scenario [POST]",
+                "/api/v1/dev/grading-targets [GET]",
+                "/api/v1/grade/attempt-answer/<attempt_answer_id> [POST]",
+                "/api/v1/grade/assessment-attempt/<assessment_attempt_id> [POST]",
+                "/api/v1/llm/test [POST]",
+            ],
+            "notes": [
+                "Deprecated standalone ASAG CRUD routes have been removed.",
+                "Shared-core-db grading and other AI workflows are being rebuilt against the lms.* and ai.* contracts.",
+                "Grading now reads from shared LMS attempts/answers and writes back AI scoring, feedback, and inference traces."
+            ],
         })
 
     return app

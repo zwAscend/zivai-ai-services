@@ -1,92 +1,162 @@
-# 🎓 ASAG Engine – Option A (MindNLP / Pangu)
-Automated Short Answer Grading engine for Computer Science (and other subjects) using **MindSpore + MindNLP** (or **Pangu NLP**) and a **rubric/markscheme-first** workflow.
+# ZivAI AI Services Engine (MindSpore / MindNLP)
 
-✅ Teachers upload **Question Papers** + **Marking Schemes** (PDF/DOCX)  
-✅ System extracts questions + marking points (no OCR / no MindOCR)  
-✅ Students submit answers  
-✅ Model grades strictly using rubric/markscheme and returns **validated JSON**  
-✅ Stores audit trail: raw model output + validated result
+MindSpore-powered AI service for ZivAI. This service is moving beyond standalone ASAG and is being aligned to the shared `core-backend` database contracts for grading, inference tracing, mastery-related workflows, and other AI capabilities.
 
----
+## Features
+- Local LLM smoke test endpoint
+- Shared-schema question grading endpoint
+- Shared-schema whole-assessment grading endpoint
+- MindSpore + MindNLP inference runtime
+- Shared PostgreSQL integration with `core-backend`
+- Foundation for grading, planning, lesson/resource generation, and related AI workflows
 
-## ✨ Features
-- **Paper upload** (PDF/DOCX)
-- **Markscheme upload** (PDF/DOCX)
-- Auto **question extraction**
-- Auto **rubric extraction** / mapping from markscheme → question ids
-- **Single grading** and optional **batch grading**
-- Strict **JSON output** with server-side validation + score clamping
-- Runs locally with:
-  - `LLM_PROVIDER=mindnlp` (Qwen2.5 etc.)
-  - `LLM_PROVIDER=pangu` (Pangu checkpoints if compatible)
+## Tech Stack
+- Flask
+- SQLAlchemy
+- PostgreSQL
+- MindSpore + MindNLP
+- pdfplumber + python-docx
 
----
-
-## 🧱 Tech Stack
-- Flask (API)
-- SQLAlchemy (ORM)
-- PostgreSQL (recommended) or SQLite (dev)
-- MindSpore + MindNLP for inference
-- pdfplumber + python-docx for text extraction (no OCR)
-
----
-
----
-
-## ✅ Requirements
+## Requirements
 - Python 3.10+
-- (Optional) PostgreSQL 14+
+- PostgreSQL 14+
 
-Install system deps (Ubuntu/Debian):
+Install system packages on Ubuntu/Debian:
+
 ```bash
 sudo apt update
 sudo apt install -y python3-venv build-essential libpq-dev postgresql postgresql-contrib
+```
 
-python3 -m venv .venv
-source .venv/bin/activate
+Create the project virtual environment and install dependencies:
+
+```bash
+cd ~/Desktop/Huawei/innovation/application/zivai-asag-engine
+python3 -m venv .engine-venv
+source .engine-venv/bin/activate
 python -m pip install -U pip
-
-
 pip install -r requirements.txt
+```
 
-**##  .env file **
+## Current Recommended Run
 
-FLASK_ENV=production
-HOST=127.0.0.1
-PORT=8000
-DEBUG=false
+This is the current working local setup:
+- shared PostgreSQL source with `core-backend`
+- MindSpore on CPU
+- `Qwen/Qwen2.5-0.5B-Instruct`
+- `MAX_NEW_TOKENS=128`
 
-DATABASE_URL=postgresql+psycopg2://postgres:password@172.20.48.1:5432/asag_engine_cs
-AUTO_CREATE_TABLES=true
+```bash
+cd ~/Desktop/Huawei/innovation/application/zivai-asag-engine
+source .engine-venv/bin/activate
 
-# mindnlp | pangu
-LLM_PROVIDER=mindnlp
+export ZIVAI_DB_URL="jdbc:postgresql://<host>:5432/zivai"
+export ZIVAI_DB_USERNAME="doadmin"
+export ZIVAI_DB_PASSWORD="<db_password>"
+export AUTO_CREATE_TABLES=false
 
-# Smaller model for stability
-MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
+export MS_DEVICE_TARGET=CPU
+export MS_STRICT_DEVICE=true
+export MS_MODE=PYNATIVE_MODE
+export MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
+export MAX_NEW_TOKENS=128
 
-# Tokens needed for grading JSON
-MAX_NEW_TOKENS=256
+ASAG_VENV="$PWD/.engine-venv" bash run.sh
+```
 
-# MindSpore execution mode
-# GRAPH_MODE = faster but heavy memory
-# PYNATIVE_MODE = safer for development
+Notes:
+- Do not commit real database passwords into the repo or `.env` examples.
+- `AUTO_CREATE_TABLES=false` is the correct setting when pointing at the shared LMS database.
+- `/api/v1/llm/test` is a `POST` route, not a `GET` route.
+- The grading endpoints are also `POST` routes and support optional `dry_run` / `force` flags in the JSON body.
+- `run.sh` already applies the local `mindnlp` import patch needed for this project, so you do not need to edit package files manually.
 
-MS_MODE=PYNATIVE_MODE
+## Shared Core DB Setup
 
-# Uploads
+ASAG now understands the same database env contract as `core-backend`:
 
-UPLOAD_DIR=data/uploads
+```bash
+export ZIVAI_DB_URL="jdbc:postgresql://<host>:5432/zivai"
+export ZIVAI_DB_USERNAME="<db_user>"
+export ZIVAI_DB_PASSWORD="<db_password>"
+```
 
-# Paper / Markscheme parsing
-Chunk sizes (characters)
+Behavior:
+- If `ZIVAI_DB_URL` is set, ASAG derives the SQLAlchemy URL from `ZIVAI_DB_URL`, `ZIVAI_DB_USERNAME`, and `ZIVAI_DB_PASSWORD`.
+- `DATABASE_URL` is still supported for direct SQLAlchemy usage.
+- When both are present, `ZIVAI_DB_URL` takes precedence so ASAG can share the same DB source as `core-backend`.
 
-PAPER_CHUNK_SIZE=12000
-PAPER_CHUNK_OVERLAP=800
+Important:
+- This only points ASAG at the same PostgreSQL instance as `core-backend`.
+- The grading service now reads and writes the shared `lms.*` and `ai.*` tables used by `core-backend`.
 
-MS_CHUNK_SIZE=14000
-MS_CHUNK_OVERLAP=800
+## Active API Routes
+- `GET /api/v1/health`
+- `POST /api/v1/dev/bootstrap-grading-scenario`
+- `GET /api/v1/dev/grading-targets`
+- `POST /api/v1/grade/attempt-answer/<attempt_answer_id>`
+- `POST /api/v1/grade/assessment-attempt/<assessment_attempt_id>`
+- `POST /api/v1/llm/test`
 
-# Curriculum Alignment
+### Dev Bootstrap Flow
 
-ALIGN_BATCH_SIZE=5
+If the shared LMS tables are empty, seed a complete grading scenario first:
+
+`POST /api/v1/dev/bootstrap-grading-scenario`
+
+Optional body:
+
+```json
+{
+  "scenario": "rubric"
+}
+```
+
+Supported scenarios:
+- `rubric`: creates a short-answer question with a marking scheme and a partial student answer
+- `holistic`: creates a short-answer question without a usable rubric so the grading service falls back to holistic LLM grading
+- `objective`: creates an objective-style question with a deterministic correct answer
+
+The bootstrap response returns:
+- `attempt_answer_id`
+- `assessment_attempt_id`
+- ready-to-use grading URLs
+
+To inspect what is available:
+
+`GET /api/v1/dev/grading-targets`
+
+### Grading API Notes
+
+Per-question grading:
+- route: `POST /api/v1/grade/attempt-answer/<attempt_answer_id>`
+- source of truth: shared `lms.attempt_answers`, `lms.assessment_questions`, `lms.questions`, `lms.marking_schemes`, `lms.marking_scheme_items`
+- write-back: `lms.attempt_answers`, `lms.assessment_attempts`, `lms.assessment_results`, `ai.ai_inference_runs`
+
+Whole-assessment grading:
+- route: `POST /api/v1/grade/assessment-attempt/<assessment_attempt_id>`
+- grades each answer on the attempt, then refreshes attempt/result rollups
+
+Optional request body:
+
+```json
+{
+  "dry_run": false,
+  "force": false
+}
+```
+
+Behavior:
+- If `human_score` already exists, the service preserves it and returns the existing grade.
+- If `ai_score` already exists and `force=false`, the service returns the existing AI grade.
+- If the student answer is blank, the service returns `0` with direct feedback and no LLM call.
+- If the question is objective and a correct answer exists in `rubric_json`, the service grades deterministically.
+- If a rubric/marking scheme exists, the LLM scores per rubric item and generates feedback.
+- If no rubric exists, the LLM falls back to holistic grading and marks the answer for review.
+
+## Current State
+- The app is currently running on CPU, so inference latency is still high.
+- `Qwen/Qwen2.5-0.5B-Instruct` is the current active model because it is the best working balance in this environment.
+- Deprecated standalone ASAG CRUD routes and local persistence models have been removed.
+- Grading now uses shared LMS/AI contracts instead of local SQLite-era tables.
+- Broader AI workflow endpoints beyond grading are still to be built.

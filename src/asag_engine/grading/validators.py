@@ -1,18 +1,41 @@
 import json
-from .schema import GradeResult
 
-def _extract_json(raw_text: str) -> str:
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+from .schema import HolisticLLMResult, RubricLLMResult
+
+
+RUBRIC_KEYS = {"items", "missing_points", "feedback_text", "confidence"}
+HOLISTIC_KEYS = {"score_awarded", "missing_points", "feedback_text", "confidence", "reason"}
+
+
+def _extract_json(raw_text: str, expected_keys: set[str]) -> str:
+    decoder = json.JSONDecoder()
+    dict_candidates: list[tuple[dict, str]] = []
+
+    for idx, char in enumerate(raw_text):
+        if char != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(raw_text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            dict_candidates.append((obj, raw_text[idx:idx + end]))
+
+    if not dict_candidates:
         raise ValueError("Model output did not contain a JSON object")
-    return raw_text[start:end+1]
 
-def parse_and_validate_grade(raw_text: str) -> GradeResult:
-    obj = json.loads(_extract_json(raw_text))
-    return GradeResult(**obj)
+    for obj, raw_obj in reversed(dict_candidates):
+        if expected_keys.issubset(obj.keys()):
+            return raw_obj
 
-def clamp_grade(result: GradeResult) -> GradeResult:
-    result.score_awarded = max(0.0, min(float(result.score_awarded), float(result.max_marks)))
-    result.confidence = max(0.0, min(float(result.confidence), 1.0))
-    return result
+    return dict_candidates[-1][1]
+
+
+def parse_rubric_grade(raw_text: str) -> RubricLLMResult:
+    obj = json.loads(_extract_json(raw_text, RUBRIC_KEYS))
+    return RubricLLMResult(**obj)
+
+
+def parse_holistic_grade(raw_text: str) -> HolisticLLMResult:
+    obj = json.loads(_extract_json(raw_text, HOLISTIC_KEYS))
+    return HolisticLLMResult(**obj)

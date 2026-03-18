@@ -1,37 +1,66 @@
-from typing import List, Optional
+from typing import Literal
+
 from pydantic import BaseModel, Field, confloat, conint
 
-class CreateRubricItem(BaseModel):
-    point_text: str = Field(..., min_length=3)
-    marks: conint(ge=0, le=50) = 1
-    keywords: Optional[List[str]] = None
 
-class CreateQuestionRequest(BaseModel):
-    subject: str = Field(..., min_length=2)
-    grade_level: str = Field(..., min_length=1)
-    topic: Optional[str] = None
-    question_no: Optional[str] = None
-    question_text: str = Field(..., min_length=5)
-    max_marks: conint(ge=1, le=300)
-    rubric: List[CreateRubricItem] = Field(..., min_length=1)
+class GradeRequestOptions(BaseModel):
+    dry_run: bool = False
+    force: bool = False
 
-class GradeRequest(BaseModel):
-    question_id: str = Field(..., min_length=3)
-    student_id: Optional[str] = None
-    student_answer: str = Field(..., min_length=1)
 
-class MarkPointAwarded(BaseModel):
-    rubric_item_id: str
+class RubricDecision(BaseModel):
+    rubric_index: conint(ge=1)
     awarded: confloat(ge=0)
-    justification: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1)
 
-class GradeResult(BaseModel):
-    score_awarded: confloat(ge=0)
-    max_marks: conint(ge=1)
-    mark_points_awarded: List[MarkPointAwarded]
-    missing_points: List[str]
-    feedback_short: str
+
+class RubricLLMResult(BaseModel):
+    items: list[RubricDecision]
+    missing_points: list[str] = Field(default_factory=list)
+    feedback_text: str = Field(..., min_length=1)
     confidence: confloat(ge=0, le=1)
 
-class TeacherOverrideRequest(BaseModel):
-    grade: GradeResult
+
+class HolisticLLMResult(BaseModel):
+    score_awarded: confloat(ge=0)
+    feedback_text: str = Field(..., min_length=1)
+    missing_points: list[str] = Field(default_factory=list)
+    confidence: confloat(ge=0, le=1)
+    reason: str = Field(..., min_length=1)
+
+
+class QuestionRubricOutcome(BaseModel):
+    rubric_index: conint(ge=1)
+    rubric_item_id: str | None = None
+    description: str
+    max_marks: confloat(ge=0)
+    awarded: confloat(ge=0)
+    reason: str
+    rubric_code: str | None = None
+
+
+class QuestionGradeResult(BaseModel):
+    mode: Literal["existing", "objective", "rubric", "holistic", "no_answer"]
+    attempt_answer_id: str
+    assessment_attempt_id: str
+    assessment_question_id: str
+    question_id: str
+    score_awarded: confloat(ge=0)
+    max_score: confloat(ge=0)
+    feedback_text: str
+    missing_points: list[str] = Field(default_factory=list)
+    confidence: confloat(ge=0, le=1) | None = None
+    requires_review: bool
+    trace_id: str | None = None
+    rubric_items: list[QuestionRubricOutcome] = Field(default_factory=list)
+
+
+class AssessmentGradeResult(BaseModel):
+    assessment_attempt_id: str
+    grading_status_code: str
+    total_score: confloat(ge=0)
+    max_score: confloat(ge=0)
+    ai_confidence: confloat(ge=0, le=1) | None = None
+    requires_review: bool
+    trace_id: str | None = None
+    question_results: list[QuestionGradeResult]

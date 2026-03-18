@@ -1,0 +1,190 @@
+{
+  "info": {
+    "_postman_id": "4e323ec8-0087-4f1b-a9e9-4990eb0c31fe",
+    "name": "ASAG Engine Option A (zivai-asag-engine)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Question/rubric-first grading flow for zivai-asag-engine."
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/health",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "health"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Question (Computer Science)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "try {",
+              "  const data = pm.response.json();",
+              "  if (data.question_id) pm.environment.set('question_id', data.question_id);",
+              "} catch (e) {}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"subject\": \"Computer Science\",\n  \"grade_level\": \"Form 4\",\n  \"topic\": \"Algorithms\",\n  \"question_no\": \"Q1\",\n  \"question_text\": \"State two differences between linear search and binary search.\",\n  \"max_marks\": 6,\n  \"rubric\": [\n    {\n      \"point_text\": \"Identifies linear search is sequential and binary search requires sorted data\",\n      \"marks\": 3,\n      \"keywords\": [\"sequential\", \"sorted\"]\n    },\n    {\n      \"point_text\": \"Compares time complexity (O(n) vs O(log n))\",\n      \"marks\": 3,\n      \"keywords\": [\"O(n)\", \"O(log n)\"]\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/questions",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "questions"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Grade Submission",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "try {",
+              "  const data = pm.response.json();",
+              "  if (data.submission_id) pm.environment.set('submission_id', data.submission_id);",
+              "} catch (e) {}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question_id\": \"{{question_id}}\",\n  \"student_id\": \"S001\",\n  \"student_answer\": \"Linear search checks each item one by one and works on unsorted arrays. Binary search works on sorted arrays and repeatedly halves the search space, so it is faster: O(log n) versus O(n).\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/grade",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "grade"
+          ]
+        }
+      }
+    },
+    {
+      "name": "List Submissions",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/submissions",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "submissions"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Submission",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/submissions/{{submission_id}}",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "submissions",
+            "{{submission_id}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Teacher Override Grade",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"grade\": {\n    \"score_awarded\": 5,\n    \"max_marks\": 6,\n    \"mark_points_awarded\": [\n      {\n        \"rubric_item_id\": \"RUB-MANUAL-1\",\n        \"awarded\": 3,\n        \"justification\": \"Student correctly explained sorted-data requirement and sequential scan difference.\"\n      },\n      {\n        \"rubric_item_id\": \"RUB-MANUAL-2\",\n        \"awarded\": 2,\n        \"justification\": \"Student compared complexities correctly but lacked detail.\"\n      }\n    ],\n    \"missing_points\": [\n      \"Could mention midpoint calculation step in binary search.\"\n    ],\n    \"feedback_short\": \"Good comparison with minor detail missing.\",\n    \"confidence\": 0.9\n  }\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/submissions/{{submission_id}}/override",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "submissions",
+            "{{submission_id}}",
+            "override"
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "question_id",
+      "value": ""
+    },
+    {
+      "key": "submission_id",
+      "value": ""
+    }
+  ]
+}
