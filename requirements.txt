@@ -18,6 +18,11 @@ python-dateutil==2.9.0.post0
 # ---- Text extraction (no OCR) ----
 pdfplumber==0.11.4
 python-docx==1.1.2
+pypdfium2==5.6.0
+
+# ---- Huawei OCR SDK ----
+huaweicloudsdkcore==3.1.187
+huaweicloudsdkocr==3.1.187
 
 # ==============================
 # MindSpore + MindNLP

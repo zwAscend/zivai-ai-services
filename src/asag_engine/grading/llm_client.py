@@ -4,7 +4,12 @@ from functools import lru_cache
 from typing import Optional
 
 class LLMClient:
-    def generate(self, system_text: str, user_text: str) -> str:
+    def generate(
+        self,
+        system_text: str,
+        user_text: str,
+        max_new_tokens: Optional[int] = None,
+    ) -> str:
         raise NotImplementedError
 
 class MindNLPLocalClient(LLMClient):
@@ -73,23 +78,29 @@ class MindNLPLocalClient(LLMClient):
                 print(f"[llm] chat template unavailable, falling back to raw prompt: {exc}")
         return self._prompt(system_text, user_text)
 
-    def generate(self, system_text: str, user_text: str) -> str:
+    def generate(
+        self,
+        system_text: str,
+        user_text: str,
+        max_new_tokens: Optional[int] = None,
+    ) -> str:
         prompt = self._render_prompt(system_text, user_text)
         tokenizer_kwargs = {"return_tensors": "ms"}
         if self.max_input_tokens > 0:
             tokenizer_kwargs.update({"truncation": True, "max_length": self.max_input_tokens})
 
+        generation_tokens = int(max_new_tokens or self.max_new_tokens)
         started = time.perf_counter()
         inputs = self.tokenizer(prompt, **tokenizer_kwargs)
         input_shape = getattr(inputs["input_ids"], "shape", ())
         input_tokens = input_shape[-1] if input_shape else "?"
         print(
             "[llm] generation start "
-            f"model={self.model_id} input_tokens={input_tokens} max_new_tokens={self.max_new_tokens}"
+            f"model={self.model_id} input_tokens={input_tokens} max_new_tokens={generation_tokens}"
         )
         output_ids = self.model.generate(
             **inputs,
-            max_new_tokens=self.max_new_tokens,
+            max_new_tokens=generation_tokens,
             do_sample=False
         )
         generated_ids = output_ids[0]

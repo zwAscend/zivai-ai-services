@@ -4,6 +4,8 @@ from .service import (
     GradingNotFoundError,
     grade_assessment_attempt,
     grade_attempt_answer,
+    grade_payload_assessment,
+    grade_payload_question,
 )
 
 __all__ = [
@@ -13,6 +15,8 @@ __all__ = [
     "build_llm_client",
     "grade_assessment_attempt",
     "grade_attempt_answer",
+    "grade_payload_assessment",
+    "grade_payload_question",
     "grade_holistically",
     "grade_with_rubric",
 ]
