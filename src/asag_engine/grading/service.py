@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -26,7 +26,15 @@ from asag_engine.db.shared_models import (
 
 from .grader import grade_holistically, grade_with_rubric
 from .llm_client import LLMClient, build_llm_client
-from .schema import AssessmentGradeResult, GradeRequestOptions, QuestionGradeResult, QuestionRubricOutcome
+from .schema import (
+    AssessmentGradePayload,
+    AssessmentGradeResult,
+    GradeRequestOptions,
+    MarkingGuidePayload,
+    QuestionGradePayload,
+    QuestionGradeResult,
+    QuestionRubricOutcome,
+)
 
 
 REVIEW_CONFIDENCE_THRESHOLD = float(os.getenv("AI_REVIEW_CONFIDENCE_THRESHOLD", "0.6"))
@@ -73,6 +81,23 @@ class GradingContext:
     @property
     def assessment(self):
         return self.assignment.assessment
+
+
+@dataclass
+class DirectGradingContext:
+    question_text: str
+    max_score: float
+    student_answer: str | None
+    question_type_code: str | None = None
+    expected_answer: str | None = None
+    expected_points: list[str] = field(default_factory=list)
+    rubric_items: list[RubricDescriptor] = field(default_factory=list)
+    attempt_answer_id: str | None = None
+    assessment_attempt_id: str | None = None
+    assessment_question_id: str | None = None
+    question_id: str | None = None
+    school_id: str | None = None
+    student_id: str | None = None
 
 
 def grade_attempt_answer(
@@ -130,6 +155,135 @@ def grade_assessment_attempt(
         trace_id=trace_id,
         question_results=results,
     )
+
+
+def grade_payload_question(
+    payload: QuestionGradePayload,
+    llm_client: LLMClient | None = None,
+) -> QuestionGradeResult:
+    llm_client = llm_client or build_llm_client()
+    context = _build_direct_context(payload)
+    return _grade_direct_context(context, payload.options, llm_client)
+
+
+def grade_payload_assessment(
+    payload: AssessmentGradePayload,
+    llm_client: LLMClient | None = None,
+) -> AssessmentGradeResult:
+    llm_client = llm_client or build_llm_client()
+    results = [
+        _grade_direct_context(
+            _build_direct_context(
+                QuestionGradePayload(
+                    request_context=_merge_request_context(payload.request_context.model_dump(), question_payload.request_context.model_dump()),
+                    question=question_payload.question,
+                    student_answer=question_payload.student_answer,
+                    marking_guide=question_payload.marking_guide,
+                    options=payload.options,
+                )
+            ),
+            payload.options,
+            llm_client,
+        )
+        for question_payload in payload.questions
+    ]
+    return AssessmentGradeResult(
+        assessment_attempt_id=payload.request_context.assessment_attempt_id,
+        grading_status_code=_derive_attempt_status(results),
+        total_score=round(sum(result.score_awarded for result in results), 2),
+        max_score=round(sum(result.max_score for result in results), 2),
+        ai_confidence=_average_confidence(results),
+        requires_review=any(result.requires_review for result in results),
+        trace_id=next((result.trace_id for result in results if result.trace_id), None),
+        question_results=results,
+    )
+
+
+def _merge_request_context(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _build_direct_context(payload: QuestionGradePayload) -> DirectGradingContext:
+    guide = payload.marking_guide or MarkingGuidePayload()
+    expected_points = [point.strip() for point in guide.expected_points if isinstance(point, str) and point.strip()]
+    if not expected_points:
+        expected_points = [item.description for item in guide.rubric_items]
+    return DirectGradingContext(
+        question_text=payload.question.text.strip(),
+        max_score=float(payload.question.max_marks),
+        student_answer=(payload.student_answer.text or "").strip() or None,
+        question_type_code=(payload.question.question_type or "").strip() or None,
+        expected_answer=(guide.expected_answer or "").strip() or None,
+        expected_points=expected_points,
+        rubric_items=[
+            RubricDescriptor(
+                rubric_index=item.index,
+                description=item.description.strip(),
+                max_marks=float(item.marks),
+                rubric_item_id=item.rubric_item_id,
+                rubric_code=item.rubric_code,
+            )
+            for item in guide.rubric_items
+        ],
+        attempt_answer_id=payload.request_context.attempt_answer_id,
+        assessment_attempt_id=payload.request_context.assessment_attempt_id,
+        assessment_question_id=payload.request_context.assessment_question_id,
+        question_id=payload.request_context.question_id,
+        school_id=payload.request_context.school_id,
+        student_id=payload.request_context.student_id,
+    )
+
+
+def _grade_direct_context(
+    context: DirectGradingContext,
+    options: GradeRequestOptions,
+    llm_client: LLMClient,
+) -> QuestionGradeResult:
+    if not context.student_answer:
+        return _no_answer_result_direct(context)
+
+    objective_score = _evaluate_objective_score_values(
+        context.question_type_code,
+        context.expected_answer,
+        context.student_answer,
+        context.max_score,
+    )
+    if objective_score is not None:
+        return _objective_result_direct(context, objective_score)
+
+    if context.rubric_items:
+        parsed, _, _, _, _ = grade_with_rubric(
+            context.question_text,
+            context.max_score,
+            [
+                {
+                    "rubric_index": item.rubric_index,
+                    "description": item.description,
+                    "max_marks": item.max_marks,
+                }
+                for item in context.rubric_items
+            ],
+            _truncate_student_answer(context.student_answer),
+            llm_client,
+        )
+        return _rubric_result_direct(context, context.rubric_items, parsed)
+
+    if not options.allow_holistic_fallback:
+        raise ValueError("No marking guide is available for this question and holistic fallback is disabled.")
+
+    parsed, _, _, _, _ = grade_holistically(
+        context.question_text,
+        context.max_score,
+        _truncate_student_answer(context.student_answer),
+        llm_client,
+        expected_answer=context.expected_answer,
+        expected_points=context.expected_points,
+    )
+    return _holistic_result_direct(context, parsed)
 
 
 
@@ -284,6 +438,7 @@ def _grade_question_context(
 def _existing_result(context: GradingContext, source: str) -> QuestionGradeResult:
     answer = context.answer
     score = _effective_score(answer)
+    feedback_text = answer.feedback_text or f"Existing {source} grading found."
     return QuestionGradeResult(
         mode="existing",
         attempt_answer_id=str(answer.id),
@@ -292,8 +447,11 @@ def _existing_result(context: GradingContext, source: str) -> QuestionGradeResul
         question_id=str(context.question.id),
         score_awarded=round(score, 2),
         max_score=round(context.max_score, 2),
-        feedback_text=answer.feedback_text or f"Existing {source} grading found.",
+        feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, []),
+        strengths=_derive_generic_strengths(score, context.max_score),
         missing_points=[],
+        next_steps=_derive_next_steps([], score, context.max_score),
         confidence=float(answer.ai_confidence) if answer.ai_confidence is not None else None,
         requires_review=bool(answer.requires_review),
         trace_id=answer.answer_trace_id,
@@ -303,6 +461,8 @@ def _existing_result(context: GradingContext, source: str) -> QuestionGradeResul
 
 
 def _no_answer_result(context: GradingContext) -> QuestionGradeResult:
+    feedback_text = "No answer was submitted. Review the question and provide the key ideas next time."
+    missing_points = ["No answer submitted."]
     return QuestionGradeResult(
         mode="no_answer",
         attempt_answer_id=str(context.answer.id),
@@ -311,8 +471,11 @@ def _no_answer_result(context: GradingContext) -> QuestionGradeResult:
         question_id=str(context.question.id),
         score_awarded=0.0,
         max_score=round(context.max_score, 2),
-        feedback_text="No answer was submitted. Review the question and provide the key ideas next time.",
-        missing_points=["No answer submitted."],
+        feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=[],
+        missing_points=missing_points,
+        next_steps=["State the main idea even if you are unsure, then refine it."],
         confidence=1.0,
         requires_review=False,
         trace_id=None,
@@ -326,11 +489,13 @@ def _objective_result(context: GradingContext, score: float) -> QuestionGradeRes
     if score > 0:
         feedback = "Correct answer."
         missing_points: list[str] = []
+        strengths = ["You matched the expected answer."]
     else:
         feedback = "Incorrect answer."
         if correct_answer:
             feedback += f" Correct answer: {correct_answer}."
         missing_points = ["Match the expected answer exactly."]
+        strengths = []
     return QuestionGradeResult(
         mode="objective",
         attempt_answer_id=str(context.answer.id),
@@ -340,7 +505,10 @@ def _objective_result(context: GradingContext, score: float) -> QuestionGradeRes
         score_awarded=round(score, 2),
         max_score=round(context.max_score, 2),
         feedback_text=feedback,
+        feedback_summary=_feedback_summary(feedback, missing_points),
+        strengths=strengths,
         missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score, context.max_score),
         confidence=1.0,
         requires_review=False,
         trace_id=None,
@@ -376,6 +544,10 @@ def _rubric_result(context: GradingContext, rubric_items: list[RubricDescriptor]
     feedback_text = parsed.feedback_text.strip() or _build_feedback_from_missing_points(missing_points)
     confidence = max(0.0, min(float(parsed.confidence), 1.0))
     requires_review = confidence < REVIEW_CONFIDENCE_THRESHOLD
+    score_awarded = round(min(total, context.max_score), 2)
+    strengths = _derive_strengths_from_rubric(outcomes)
+    if not strengths:
+        strengths = _derive_generic_strengths(score_awarded, context.max_score)
 
     return QuestionGradeResult(
         mode="rubric",
@@ -383,10 +555,13 @@ def _rubric_result(context: GradingContext, rubric_items: list[RubricDescriptor]
         assessment_attempt_id=str(context.answer.assessment_attempt_id),
         assessment_question_id=str(context.answer.assessment_question_id),
         question_id=str(context.question.id),
-        score_awarded=round(min(total, context.max_score), 2),
+        score_awarded=score_awarded,
         max_score=round(context.max_score, 2),
         feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=strengths,
         missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score_awarded, context.max_score),
         confidence=confidence,
         requires_review=requires_review,
         trace_id=None,
@@ -399,18 +574,155 @@ def _holistic_result(context: GradingContext, parsed) -> QuestionGradeResult:
     confidence = max(0.0, min(float(parsed.confidence), 1.0))
     feedback_text = parsed.feedback_text.strip() or parsed.reason.strip()
     missing_points = [point.strip() for point in parsed.missing_points if isinstance(point, str) and point.strip()]
-    if not missing_points and parsed.score_awarded < context.max_score:
+    score_awarded = round(min(float(parsed.score_awarded), context.max_score), 2)
+    if not missing_points and score_awarded < context.max_score:
         missing_points = ["Key ideas from the expected answer were missing."]
+    strengths = _derive_generic_strengths(score_awarded, context.max_score, fallback=parsed.reason.strip())
     return QuestionGradeResult(
         mode="holistic",
         attempt_answer_id=str(context.answer.id),
         assessment_attempt_id=str(context.answer.assessment_attempt_id),
         assessment_question_id=str(context.answer.assessment_question_id),
         question_id=str(context.question.id),
-        score_awarded=round(min(float(parsed.score_awarded), context.max_score), 2),
+        score_awarded=score_awarded,
         max_score=round(context.max_score, 2),
         feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=strengths,
         missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score_awarded, context.max_score),
+        confidence=confidence,
+        requires_review=True,
+        trace_id=None,
+        rubric_items=[],
+    )
+
+
+def _no_answer_result_direct(context: DirectGradingContext) -> QuestionGradeResult:
+    feedback_text = "No answer was submitted. Review the question and provide the key ideas next time."
+    missing_points = ["No answer submitted."]
+    return QuestionGradeResult(
+        mode="no_answer",
+        attempt_answer_id=context.attempt_answer_id,
+        assessment_attempt_id=context.assessment_attempt_id,
+        assessment_question_id=context.assessment_question_id,
+        question_id=context.question_id,
+        score_awarded=0.0,
+        max_score=round(context.max_score, 2),
+        feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=[],
+        missing_points=missing_points,
+        next_steps=["State the main idea even if you are unsure, then refine it."],
+        confidence=1.0,
+        requires_review=False,
+        trace_id=None,
+        rubric_items=[],
+    )
+
+
+def _objective_result_direct(context: DirectGradingContext, score: float) -> QuestionGradeResult:
+    if score > 0:
+        feedback = "Correct answer."
+        missing_points: list[str] = []
+        strengths = ["You matched the expected answer."]
+    else:
+        feedback = "Incorrect answer."
+        if context.expected_answer:
+            feedback += f" Correct answer: {context.expected_answer}."
+        missing_points = ["Match the expected answer exactly."]
+        strengths = []
+    return QuestionGradeResult(
+        mode="objective",
+        attempt_answer_id=context.attempt_answer_id,
+        assessment_attempt_id=context.assessment_attempt_id,
+        assessment_question_id=context.assessment_question_id,
+        question_id=context.question_id,
+        score_awarded=round(score, 2),
+        max_score=round(context.max_score, 2),
+        feedback_text=feedback,
+        feedback_summary=_feedback_summary(feedback, missing_points),
+        strengths=strengths,
+        missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score, context.max_score),
+        confidence=1.0,
+        requires_review=False,
+        trace_id=None,
+        rubric_items=[],
+    )
+
+
+def _rubric_result_direct(context: DirectGradingContext, rubric_items: list[RubricDescriptor], parsed) -> QuestionGradeResult:
+    decisions = {int(item.rubric_index): item for item in parsed.items}
+    outcomes: list[QuestionRubricOutcome] = []
+    total = 0.0
+    for descriptor in rubric_items:
+        decision = decisions.get(descriptor.rubric_index)
+        awarded = 0.0 if decision is None else max(0.0, min(float(decision.awarded), descriptor.max_marks))
+        reason = decision.reason.strip() if decision is not None else "Not demonstrated."
+        total += awarded
+        outcomes.append(
+            QuestionRubricOutcome(
+                rubric_index=descriptor.rubric_index,
+                rubric_item_id=descriptor.rubric_item_id,
+                description=descriptor.description,
+                max_marks=round(descriptor.max_marks, 2),
+                awarded=round(awarded, 2),
+                reason=reason,
+                rubric_code=descriptor.rubric_code,
+            )
+        )
+
+    missing_points = [point.strip() for point in parsed.missing_points if isinstance(point, str) and point.strip()]
+    if not missing_points:
+        missing_points = [item.description for item in rubric_items if decisions.get(item.rubric_index) is None or float(decisions[item.rubric_index].awarded) <= 0]
+    feedback_text = parsed.feedback_text.strip() or _build_feedback_from_missing_points(missing_points)
+    confidence = max(0.0, min(float(parsed.confidence), 1.0))
+    score_awarded = round(min(total, context.max_score), 2)
+    strengths = _derive_strengths_from_rubric(outcomes)
+    if not strengths:
+        strengths = _derive_generic_strengths(score_awarded, context.max_score)
+    return QuestionGradeResult(
+        mode="rubric",
+        attempt_answer_id=context.attempt_answer_id,
+        assessment_attempt_id=context.assessment_attempt_id,
+        assessment_question_id=context.assessment_question_id,
+        question_id=context.question_id,
+        score_awarded=score_awarded,
+        max_score=round(context.max_score, 2),
+        feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=strengths,
+        missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score_awarded, context.max_score),
+        confidence=confidence,
+        requires_review=confidence < REVIEW_CONFIDENCE_THRESHOLD,
+        trace_id=None,
+        rubric_items=outcomes,
+    )
+
+
+def _holistic_result_direct(context: DirectGradingContext, parsed) -> QuestionGradeResult:
+    confidence = max(0.0, min(float(parsed.confidence), 1.0))
+    feedback_text = parsed.feedback_text.strip() or parsed.reason.strip()
+    missing_points = [point.strip() for point in parsed.missing_points if isinstance(point, str) and point.strip()]
+    score_awarded = round(min(float(parsed.score_awarded), context.max_score), 2)
+    if not missing_points and score_awarded < context.max_score:
+        missing_points = ["Key ideas from the expected answer were missing."]
+    strengths = _derive_generic_strengths(score_awarded, context.max_score, fallback=parsed.reason.strip())
+    return QuestionGradeResult(
+        mode="holistic",
+        attempt_answer_id=context.attempt_answer_id,
+        assessment_attempt_id=context.assessment_attempt_id,
+        assessment_question_id=context.assessment_question_id,
+        question_id=context.question_id,
+        score_awarded=score_awarded,
+        max_score=round(context.max_score, 2),
+        feedback_text=feedback_text,
+        feedback_summary=_feedback_summary(feedback_text, missing_points),
+        strengths=strengths,
+        missing_points=missing_points,
+        next_steps=_derive_next_steps(missing_points, score_awarded, context.max_score),
         confidence=confidence,
         requires_review=True,
         trace_id=None,
@@ -752,15 +1064,28 @@ def _extract_correct_answer(rubric_json: Any) -> str | None:
 
 
 def _evaluate_objective_score(context: GradingContext) -> float | None:
-    question_type = (context.question.question_type_code or "").lower()
+    return _evaluate_objective_score_values(
+        context.question.question_type_code,
+        _extract_correct_answer(context.question.rubric_json),
+        context.student_answer,
+        context.max_score,
+    )
+
+
+def _evaluate_objective_score_values(
+    question_type_code: str | None,
+    correct_answer: str | None,
+    student_answer: str | None,
+    max_score: float,
+) -> float | None:
+    question_type = (question_type_code or "").lower()
     objective = any(token in question_type for token in ("mcq", "multiple_choice", "true_false", "truefalse", "boolean"))
     if not objective:
         return None
-    correct_answer = _extract_correct_answer(context.question.rubric_json)
-    if not correct_answer or not context.student_answer:
+    if not correct_answer or not student_answer:
         return None
-    if _normalize_answer(correct_answer) == _normalize_answer(context.student_answer):
-        return round(context.max_score, 2)
+    if _normalize_answer(correct_answer) == _normalize_answer(student_answer):
+        return round(max_score, 2)
     return 0.0
 
 
@@ -823,6 +1148,33 @@ def _derive_attempt_status(results: list[QuestionGradeResult]) -> str:
         return "auto_graded"
     return "pending"
 
+
+def _feedback_summary(feedback_text: str, missing_points: list[str]) -> str:
+    text = (feedback_text or "").strip()
+    if text:
+        return text
+    return _build_feedback_from_missing_points(missing_points)
+
+
+def _derive_strengths_from_rubric(outcomes: list[QuestionRubricOutcome]) -> list[str]:
+    strengths = [item.description for item in outcomes if float(item.awarded) > 0]
+    return strengths[:3]
+
+
+def _derive_generic_strengths(score_awarded: float, max_score: float, fallback: str | None = None) -> list[str]:
+    if score_awarded >= max_score > 0:
+        return [fallback or "You covered the key idea accurately."]
+    if score_awarded > 0:
+        return [fallback or "You showed some relevant understanding in your answer."]
+    return []
+
+
+def _derive_next_steps(missing_points: list[str], score_awarded: float, max_score: float) -> list[str]:
+    if missing_points:
+        return [f"Review: {point}" for point in missing_points[:3]]
+    if score_awarded < max_score:
+        return ["Revise the key idea and try a similar practice question."]
+    return ["Keep using the same method on similar questions."]
 
 
 def _build_feedback_from_missing_points(missing_points: list[str]) -> str:

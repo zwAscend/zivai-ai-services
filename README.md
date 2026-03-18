@@ -4,6 +4,10 @@ MindSpore-powered AI service for ZivAI. This service is moving beyond standalone
 
 ## Features
 - Local LLM smoke test endpoint
+- Teacher assessment generation endpoint
+- General OCR endpoint for images, scanned PDFs, and digital documents
+- Payload-based per-question grading endpoint
+- Payload-based whole-assessment grading endpoint
 - Shared-schema question grading endpoint
 - Shared-schema whole-assessment grading endpoint
 - MindSpore + MindNLP inference runtime
@@ -15,6 +19,7 @@ MindSpore-powered AI service for ZivAI. This service is moving beyond standalone
 - SQLAlchemy
 - PostgreSQL
 - MindSpore + MindNLP
+- Huawei OCR Python SDK
 - pdfplumber + python-docx
 
 ## Requirements
@@ -38,6 +43,14 @@ python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
+Optional tracked env helper:
+
+```bash
+source scripts/export_ai_service_env.sh
+```
+
+It exposes the current MindSpore runtime defaults plus the Huawei OCR env names used by `/api/v1/agents/ocr/general`.
+
 ## Current Recommended Run
 
 This is the current working local setup:
@@ -60,6 +73,11 @@ export MS_STRICT_DEVICE=true
 export MS_MODE=PYNATIVE_MODE
 export MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
 export MAX_NEW_TOKENS=128
+
+export HWC_AK="<huaweicloud_ak>"
+export HWC_SK="<huaweicloud_sk>"
+export HWC_PROJECT_ID="<huaweicloud_project_id>"
+export HWC_OCR_ENDPOINT="https://ocr.ap-southeast-1.myhuaweicloud.com"
 
 ASAG_VENV="$PWD/.engine-venv" bash run.sh
 ```
@@ -94,9 +112,449 @@ Important:
 - `GET /api/v1/health`
 - `POST /api/v1/dev/bootstrap-grading-scenario`
 - `GET /api/v1/dev/grading-targets`
+- `POST /api/v1/agents/teacher/assessment-generation`
+- `POST /api/v1/agents/teacher/plan-generation`
+- `POST /api/v1/agents/student/assessment`
+- `POST /api/v1/agents/ocr/general`
+- `POST /api/v1/grade/question`
+- `POST /api/v1/grade/assessment`
 - `POST /api/v1/grade/attempt-answer/<attempt_answer_id>`
 - `POST /api/v1/grade/assessment-attempt/<assessment_attempt_id>`
 - `POST /api/v1/llm/test`
+
+### Teacher Assessment Generation
+
+Route:
+- `POST /api/v1/agents/teacher/assessment-generation`
+
+This route is currently implemented to match the request body already sent by `zivai-web`.
+It returns a top-level JSON array so the current frontend can consume it without a patch.
+
+Current request body:
+
+```json
+{
+  "context": "Generate questions for Binary Search quiz. Focus on practical understanding.",
+  "difficulty": "medium",
+  "questionTypes": "mixed",
+  "numberOfQuestions": 5,
+  "attributes": {
+    "Algorithms": "Core search and sort techniques",
+    "Problem Solving": "Applying algorithmic reasoning"
+  },
+  "referenceDocuments": [
+    {
+      "documentName": "binary_search_notes.pdf",
+      "markdown": "# Binary Search\\nBinary search works on sorted data..."
+    }
+  ],
+  "tags": ["Algorithms", "Binary Search"]
+}
+```
+
+Current response body:
+
+```json
+[
+  {
+    "text": "What is binary search primarily used for?",
+    "type": "multiple_choice",
+    "options": [
+      "Searching sorted data",
+      "Sorting data",
+      "Compressing files",
+      "Encrypting data"
+    ],
+    "correctAnswer": "Searching sorted data",
+    "correctAnswers": ["Searching sorted data"],
+    "explanation": "Award the mark for identifying binary search as a search algorithm for sorted data.",
+    "difficulty": "medium",
+    "tags": ["Algorithms", "Binary Search"],
+    "points": 1,
+    "maxMarks": 1,
+    "markingGuide": {
+      "mode": "objective",
+      "expectedAnswer": "Searching sorted data",
+      "rubricItems": []
+    },
+    "rubricJson": {
+      "correctAnswer": "Searching sorted data",
+      "correctAnswers": ["Searching sorted data"],
+      "expectedAnswer": "Searching sorted data",
+      "markingGuide": "Award the mark for identifying binary search as a search algorithm for sorted data.",
+      "rubricItems": []
+    },
+    "referenceFallbackUsed": false,
+    "sourceDocumentsUsed": ["binary_search_notes.pdf"]
+  },
+  {
+    "text": "Explain one condition required before binary search can be used.",
+    "type": "short_answer",
+    "options": [],
+    "correctAnswer": null,
+    "correctAnswers": [],
+    "explanation": "Award marks for stating that the data must be sorted.",
+    "difficulty": "medium",
+    "tags": ["Algorithms", "Binary Search"],
+    "points": 4,
+    "maxMarks": 4,
+    "markingGuide": {
+      "mode": "rubric",
+      "expectedAnswer": "The data must be sorted before binary search can be used.",
+      "rubricItems": [
+        {
+          "index": 1,
+          "description": "States that the data must be sorted",
+          "marks": 4,
+          "keywords": ["sorted"]
+        }
+      ]
+    },
+    "rubricJson": {
+      "correctAnswer": null,
+      "correctAnswers": [],
+      "expectedAnswer": "The data must be sorted before binary search can be used.",
+      "markingGuide": "Award marks for stating that the data must be sorted.",
+      "rubricItems": [
+        {
+          "index": 1,
+          "description": "States that the data must be sorted",
+          "marks": 4,
+          "keywords": ["sorted"]
+        }
+      ]
+    },
+    "referenceFallbackUsed": false,
+    "sourceDocumentsUsed": ["binary_search_notes.pdf"]
+  }
+]
+```
+
+Behavior:
+- `questionTypes=multiple_choice` produces objective questions.
+- `questionTypes=structured` produces short-answer questions with rubrics.
+- `questionTypes=mixed` produces a mix of objective and structured questions.
+- A marking guide is generated for every question.
+- If `referenceDocuments` are missing, empty, or unusable, the service falls back to the provided `context`, `attributes`, `tags`, and general Computer Science knowledge instead of failing.
+- The response already includes `rubricJson`-style data that can later be mapped into the shared LMS persistence layer.
+
+### General OCR
+
+Route:
+- `POST /api/v1/agents/ocr/general`
+
+This is a separate OCR route. It does not change the existing grading or teacher-agent contracts.
+
+Purpose:
+- extract text from images and scanned PDFs using Huawei OCR
+- extract text from digital PDFs, `.docx`, and plain-text files without paying OCR cost when direct text is already available
+- return `referenceDocuments` payloads that can be passed into the teacher generation flows later
+
+Huawei OCR environment variables:
+
+```bash
+export HWC_AK="<huaweicloud_ak>"
+export HWC_SK="<huaweicloud_sk>"
+export HWC_PROJECT_ID="<huaweicloud_project_id>"
+export HWC_OCR_ENDPOINT="https://ocr.ap-southeast-1.myhuaweicloud.com"
+export HWC_HOST="ocr.ap-southeast-1.myhuaweicloud.com"
+export HWC_FORCE_TRAILING_SLASH=false
+export HWC_HTTP_TIMEOUT_SECONDS=180
+
+export HWC_GENERAL_TEXT_DETECT_DIRECTION=true
+export HWC_GENERAL_TEXT_QUICK_MODE=false
+export HWC_GENERAL_TEXT_MAX_ORIGINAL_FILE_SIZE_BYTES=7340032
+export HWC_GENERAL_TEXT_MAX_ENCODED_IMAGE_BYTES=2500000
+export HWC_GENERAL_TEXT_MAX_IMAGE_WIDTH=2200
+export HWC_GENERAL_TEXT_MAX_IMAGE_HEIGHT=2200
+export HWC_GENERAL_TEXT_JPEG_QUALITY=0.72
+export HWC_GENERAL_TEXT_MIN_JPEG_QUALITY=0.50
+export HWC_GENERAL_TEXT_ADAPTIVE_RESIZE_PERCENT=85
+export HWC_GENERAL_TEXT_MAX_ADAPTIVE_PASSES=6
+export HWC_GENERAL_TEXT_PDF_RENDER_DPI=200
+export HWC_GENERAL_TEXT_MAX_PDF_PAGES=50
+```
+
+Request:
+- `multipart/form-data`
+- supported fields:
+  - `file` or repeated `files`
+  - optional `request` JSON blob
+  - or direct form fields such as `module`, `source`, `language`, `preferDigitalExtraction`, `forceOcr`
+
+Frontend compatibility:
+- If the request is a bare file upload with no extra form fields, the route returns the legacy top-level array currently expected by `zivai-web/src/services/aiService.ts`.
+- If the request includes a `request` JSON blob, extra form fields, or `response_mode=full`, the route returns the richer object wrapper documented below.
+
+Example request:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/agents/ocr/general" \
+  -F "file=@/path/to/binary-search-notes.pdf" \
+  -F 'request={"source":"teacher_assessment_generation","module":"Binary Search","preferDigitalExtraction":true,"forceOcr":false,"detectDirection":true,"returnMarkdownResult":true}'
+```
+
+Example response:
+
+```json
+{
+  "status": "ok",
+  "request": {
+    "source": "teacher_assessment_generation",
+    "module": "Binary Search",
+    "url": null,
+    "language": null,
+    "preferDigitalExtraction": true,
+    "forceOcr": false,
+    "detectDirection": true,
+    "quickMode": false,
+    "characterMode": false,
+    "singleOrientationMode": false,
+    "returnMarkdownResult": true,
+    "maxPages": null
+  },
+  "documents": [
+    {
+      "documentName": "binary-search-notes.pdf",
+      "fileFormat": "pdf",
+      "pageNumber": 1,
+      "totalPages": 2,
+      "engine": "builtin-digital-text",
+      "mode": "digital_text",
+      "fullText": "Binary search works on sorted data...",
+      "markdown": "Binary search works on sorted data...",
+      "averageConfidence": null,
+      "wordsBlockCount": 14,
+      "module": "Binary Search",
+      "source": "teacher_assessment_generation",
+      "referenceDocument": {
+        "documentName": "binary-search-notes.pdf#page-1",
+        "markdown": "Binary search works on sorted data..."
+      },
+      "metadata": {
+        "source": "pdfplumber"
+      }
+    }
+  ],
+  "combinedText": "Binary search works on sorted data...",
+  "referenceDocuments": [
+    {
+      "documentName": "binary-search-notes.pdf#page-1",
+      "markdown": "Binary search works on sorted data..."
+    }
+  ],
+  "warnings": [
+    "Used built-in digital PDF extraction for 'binary-search-notes.pdf' where selectable text was available."
+  ]
+}
+```
+
+Behavior:
+- Images and scanned PDFs use Huawei OCR through the Python SDK.
+- Text PDFs use direct extraction first when `preferDigitalExtraction=true`.
+- `.docx`, `.txt`, `.md`, `.csv`, and `.json` use built-in text extraction.
+- If Huawei OCR credentials are missing, digital documents still work, but image and scanned-PDF OCR will fail with a clear configuration error.
+
+Legacy response example for current `zivai-web` OCR calls:
+
+```json
+[
+  {
+    "documentName": "binary-search-notes.pdf#page-1",
+    "markdown": "Binary search works on sorted data..."
+  }
+]
+```
+
+### Teacher Development Plan Generation
+
+Route:
+- `POST /api/v1/agents/teacher/plan-generation`
+
+This route currently supports the legacy request body already sent by `zivai-web` and returns a `Plan`-shaped object that the teacher workspace can save and render immediately.
+
+Current request body:
+
+```json
+{
+  "firstName": "Tariro",
+  "lastName": "Moyo",
+  "subjectName": "Computer Science",
+  "subjectID": "subject-uuid",
+  "currentOverallScore": "62.5%",
+  "potentialOverallScore": "73%",
+  "targetScore": "85%",
+  "overallPerformance": "Average",
+  "overallEngagement": "Medium",
+  "attributeDetails": [
+    {
+      "name": "Algorithms",
+      "currentScore": "55%",
+      "potentialScore": "70%",
+      "targetScore": "75%",
+      "gap": "20%",
+      "weight": "1"
+    },
+    {
+      "name": "Problem Solving",
+      "currentScore": "60%",
+      "potentialScore": "78%",
+      "targetScore": "80%",
+      "gap": "20%",
+      "weight": "1"
+    }
+  ],
+  "context": "Focus on actionable steps, varied resources, and clear goals.",
+  "referenceDocuments": []
+}
+```
+
+Current response body:
+
+```json
+{
+  "name": "Computer Science Development Plan",
+  "description": "Personalized plan for Tariro Moyo targeting Algorithms and Problem Solving.",
+  "progress": 0,
+  "potentialOverall": 78,
+  "eta": 28,
+  "performance": "Average",
+  "skills": [
+    {
+      "name": "Algorithms",
+      "score": 75,
+      "subskills": [
+        {
+          "name": "Algorithms mastery target",
+          "score": 75,
+          "color": "yellow"
+        }
+      ]
+    },
+    {
+      "name": "Problem Solving",
+      "score": 80,
+      "subskills": [
+        {
+          "name": "Problem Solving mastery target",
+          "score": 80,
+          "color": "yellow"
+        }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "title": "Review core concepts for Algorithms",
+      "type": "document",
+      "content": "<p><strong>Critical Skill Focus:</strong> Algorithms</p><p><strong>Subject:</strong> Computer Science</p><p><strong>Teacher Objective:</strong> Close the learner's gaps in Algorithms and Problem Solving.</p><p><strong>Guidance:</strong> Use scaffolded instruction, concrete examples, focused practice, and short mastery checks.</p><p><strong>Why this matters:</strong> Current 55% vs target 75% (gap 20%).</p>",
+      "link": "",
+      "additionalResources": [],
+      "order": 1
+    }
+  ],
+  "subjectId": "subject-uuid",
+  "referenceFallbackUsed": true,
+  "criticalSkillsUsed": ["Algorithms", "Problem Solving"]
+}
+```
+
+Behavior:
+- The route returns a `Plan`-compatible object for the current teacher UI.
+- Only critical skills with positive gaps are used when building the plan.
+- Generated `steps` are normalized so they address the critical skills only.
+- If the model drifts or returns unusable JSON, the service falls back to a deterministic plan instead of returning an empty workflow.
+- If `referenceDocuments` are missing, empty, or unusable, the service falls back to the learner profile, critical-skill data, and general subject knowledge.
+
+### Student Assessment
+
+Route:
+- `POST /api/v1/agents/student/assessment`
+
+This route matches the current `zivai-web/src/services/externalAssessmentService.ts` contract.
+
+Request:
+- `multipart/form-data`
+- send either:
+  - `text` + `module`
+  - or `file` + `module`
+
+Examples:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/agents/student/assessment" \
+  -F "text=Binary search checks the middle element and works on sorted data." \
+  -F "module=Binary Search"
+```
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/agents/student/assessment" \
+  -F "file=@/path/to/answer.jpg" \
+  -F "module=Binary Search"
+```
+
+Current response body:
+
+```json
+{
+  "module": "Binary Search",
+  "filename": "answer.jpg",
+  "content_type": "image/jpeg",
+  "ocr_type": "ocr",
+  "markdown": "Binary search checks the middle element and works on sorted data.",
+  "pages": 1,
+  "assessment": {
+    "is_correct_module": true,
+    "confidence_assessment_score": 0.82,
+    "total_possible_marks": 10,
+    "marks_achieved": 7,
+    "marks_percentage": 70,
+    "overall_feedback": "Your response is relevant to the module and shows partial understanding, but it needs more detail on the key conditions and process.",
+    "strengths": [
+      "Your response stays on the declared module.",
+      "You identified one core idea correctly."
+    ],
+    "improvements": [
+      "Explain the main process more fully.",
+      "Add one or two more module-specific ideas."
+    ],
+    "criteria": [
+      {
+        "criterion": "Module relevance",
+        "score": 8,
+        "feedback": "The response stays on topic."
+      },
+      {
+        "criterion": "Concept understanding",
+        "score": 7,
+        "feedback": "The answer shows partial conceptual understanding."
+      },
+      {
+        "criterion": "Clarity and completeness",
+        "score": 6,
+        "feedback": "The response is understandable but not yet complete."
+      }
+    ],
+    "assessment_details": {
+      "response": {
+        "max_marks": 10,
+        "awarded_marks": 7,
+        "feedback": "Your response is relevant to the module and shows partial understanding, but it needs more detail on the key conditions and process.",
+        "improvement": "Explain the main process more fully."
+      }
+    },
+    "detected_module": "Binary Search",
+    "mark_consistency_check": "consistent",
+    "marking_scheme_used": false
+  }
+}
+```
+
+Behavior:
+- If `file` is provided, the route first extracts text using the OCR module.
+- If the file contains digital text, it prefers direct extraction before OCR.
+- If OCR/model JSON fails, the route falls back to a deterministic heuristic assessment instead of returning no feedback.
+- This route is currently stateless and does not persist to the shared LMS database yet.
 
 ### Dev Bootstrap Flow
 
@@ -127,6 +585,119 @@ To inspect what is available:
 `GET /api/v1/dev/grading-targets`
 
 ### Grading API Notes
+
+Primary payload-based question grading:
+- route: `POST /api/v1/grade/question`
+- intended caller: `core-backend`, using the canonical question + answer snapshot
+- works with or without a rubric/guide
+
+Example request body:
+
+```json
+{
+  "request_context": {
+    "assessment_attempt_id": "b9d0a4d8-1c1d-4e0b-9f08-6d5e8b7a1111",
+    "attempt_answer_id": "f7c85d3f-2a5f-47f8-8c4e-3f2d30b5a123",
+    "assessment_question_id": "11111111-2222-3333-4444-555555555555",
+    "question_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "student_id": "99999999-8888-7777-6666-555555555555",
+    "school_id": "12345678-1234-1234-1234-123456789012"
+  },
+  "question": {
+    "text": "Explain what binary search is and state two conditions required before it can be used.",
+    "subject": "Computer Science",
+    "topic": "Search Algorithms",
+    "question_type": "short_answer",
+    "max_marks": 5
+  },
+  "student_answer": {
+    "text": "Binary search checks the middle item and keeps searching in the half where the answer could be. It works when the data is sorted."
+  },
+  "marking_guide": {
+    "rubric_items": [
+      {
+        "index": 1,
+        "description": "Defines binary search as checking the middle element and halving the search space",
+        "marks": 3,
+        "keywords": ["middle", "halving", "search space"]
+      },
+      {
+        "index": 2,
+        "description": "States that the data must be sorted",
+        "marks": 1,
+        "keywords": ["sorted", "ordered"]
+      }
+    ],
+    "expected_answer": null,
+    "expected_points": []
+  },
+  "options": {
+    "dry_run": false,
+    "force": false,
+    "allow_holistic_fallback": true
+  }
+}
+```
+
+Primary payload-based whole-assessment grading:
+- route: `POST /api/v1/grade/assessment`
+- grades every question payload in the request body and returns question-level feedback
+
+Example request body:
+
+```json
+{
+  "request_context": {
+    "assessment_attempt_id": "b9d0a4d8-1c1d-4e0b-9f08-6d5e8b7a1111",
+    "student_id": "99999999-8888-7777-6666-555555555555",
+    "school_id": "12345678-1234-1234-1234-123456789012"
+  },
+  "questions": [
+    {
+      "request_context": {
+        "attempt_answer_id": "f7c85d3f-2a5f-47f8-8c4e-3f2d30b5a123",
+        "assessment_question_id": "11111111-2222-3333-4444-555555555555",
+        "question_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+      },
+      "question": {
+        "text": "Explain what binary search is and state two conditions required before it can be used.",
+        "subject": "Computer Science",
+        "topic": "Search Algorithms",
+        "question_type": "short_answer",
+        "max_marks": 5
+      },
+      "student_answer": {
+        "text": "Binary search checks the middle item and keeps searching in the half where the answer could be. It works when the data is sorted."
+      },
+      "marking_guide": {
+        "rubric_items": [
+          {
+            "index": 1,
+            "description": "Defines binary search as checking the middle element and halving the search space",
+            "marks": 3
+          },
+          {
+            "index": 2,
+            "description": "States that the data must be sorted",
+            "marks": 1
+          }
+        ]
+      }
+    }
+  ],
+  "options": {
+    "dry_run": false,
+    "force": false,
+    "allow_holistic_fallback": true
+  }
+}
+```
+
+Payload grading behavior:
+- If a marking guide exists, the LLM grades per rubric item.
+- If no marking guide exists, the service falls back to holistic grading.
+- The response always includes `feedback_summary`, `strengths`, `missing_points`, and `next_steps`.
+- Payload routes are stateless and currently do not write back to the DB.
 
 Per-question grading:
 - route: `POST /api/v1/grade/attempt-answer/<attempt_answer_id>`

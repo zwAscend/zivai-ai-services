@@ -3,10 +3,12 @@ from flask import Flask, jsonify
 from dotenv import load_dotenv
 from asag_engine.db import init_db
 
+from .agent_routes import bp as agent_bp
 from .dev_routes import bp as dev_bp
 from .grading_routes import bp as grading_bp
 from .health_routes import bp as health_bp
 from .llm_routes import bp as llm_bp
+from .ocr_routes import bp as ocr_bp
 
 
 load_dotenv()
@@ -18,9 +20,11 @@ def create_app() -> Flask:
     init_db(auto_create=auto_create)
 
     app.register_blueprint(dev_bp)
+    app.register_blueprint(agent_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(grading_bp)
     app.register_blueprint(llm_bp)
+    app.register_blueprint(ocr_bp)
 
     @app.get("/")
     def root():
@@ -32,6 +36,12 @@ def create_app() -> Flask:
                 "/api/v1/health",
                 "/api/v1/dev/bootstrap-grading-scenario [POST]",
                 "/api/v1/dev/grading-targets [GET]",
+                "/api/v1/agents/teacher/assessment-generation [POST]",
+                "/api/v1/agents/teacher/plan-generation [POST]",
+                "/api/v1/agents/student/assessment [POST]",
+                "/api/v1/agents/ocr/general [POST]",
+                "/api/v1/grade/question [POST]",
+                "/api/v1/grade/assessment [POST]",
                 "/api/v1/grade/attempt-answer/<attempt_answer_id> [POST]",
                 "/api/v1/grade/assessment-attempt/<assessment_attempt_id> [POST]",
                 "/api/v1/llm/test [POST]",
