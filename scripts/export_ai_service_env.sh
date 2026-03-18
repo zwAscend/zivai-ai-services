@@ -13,6 +13,28 @@ export MS_MODE="${MS_MODE:-PYNATIVE_MODE}"
 export MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-0.5B-Instruct}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 
+# ASAG short-answer model artifacts.
+export ASAG_ENABLED="${ASAG_ENABLED:-true}"
+export ASAG_MODEL_DIR="${ASAG_MODEL_DIR:-$PWD/models/asag}"
+export ASAG_CKPT_PATH="${ASAG_CKPT_PATH:-$ASAG_MODEL_DIR/asag_mohler_best.ckpt}"
+export ASAG_MINDIR_PATH="${ASAG_MINDIR_PATH:-$ASAG_MODEL_DIR/asag_mohler.mindir}"
+export ASAG_VOCAB_PATH="${ASAG_VOCAB_PATH:-$ASAG_MODEL_DIR/tokenizer/vocab.json}"
+export ASAG_RESULTS_PATH="${ASAG_RESULTS_PATH:-$ASAG_MODEL_DIR/results.json}"
+export ASAG_MAX_LENGTH="${ASAG_MAX_LENGTH:-256}"
+export ASAG_HIDDEN_SIZE="${ASAG_HIDDEN_SIZE:-256}"
+export ASAG_DROPOUT_PROB="${ASAG_DROPOUT_PROB:-0.2}"
+export ASAG_RAW_SCORE_MAX="${ASAG_RAW_SCORE_MAX:-5.0}"
+export ASAG_SHORT_ANSWER_MAX_MARKS="${ASAG_SHORT_ANSWER_MAX_MARKS:-5.0}"
+
+# DKT artifacts and subject defaults.
+export DKT_MODEL_DIR="${DKT_MODEL_DIR:-$PWD/models/dkt}"
+export DKT_CLOUD_CKPT_PATH="${DKT_CLOUD_CKPT_PATH:-$DKT_MODEL_DIR/dkt_lstm_cloud.ckpt}"
+export DKT_EDGE_MINDIR_PATH="${DKT_EDGE_MINDIR_PATH:-$DKT_MODEL_DIR/dkt_lstm_edge.mindir}"
+export DKT_SKILL_MAP_PATH="${DKT_SKILL_MAP_PATH:-$DKT_MODEL_DIR/skill_map_v1.json}"
+export DKT_MODEL_META_PATH="${DKT_MODEL_META_PATH:-$DKT_MODEL_DIR/model_meta.json}"
+export DKT_DEFAULT_SUBJECT_CODE="${DKT_DEFAULT_SUBJECT_CODE:-computer_science}"
+export DKT_WEAK_SKILL_LIMIT="${DKT_WEAK_SKILL_LIMIT:-5}"
+
 # Huawei OCR credentials. Keep these out of git and inject them from your shell or secrets manager.
 export HWC_AK="${HWC_AK:-}"
 export HWC_SK="${HWC_SK:-}"

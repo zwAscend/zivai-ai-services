@@ -1,0 +1,11 @@
+{
+  "val_loss": 0.012378117101716584,
+  "pearson": 0.5727311664375159,
+  "rmse": 0.9859339048305235,
+  "mae": 0.6315572777889359,
+  "qwk": 0.5556187840560352,
+  "num_val_samples": 457,
+  "encoder_backend": "fallback(BiGRUEncoder, vocab_size=3987)",
+  "tokenizer_backend": "simple",
+  "mindspore_version": "1.8.0"
+}

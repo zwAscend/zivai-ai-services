@@ -99,7 +99,7 @@ class QuestionRubricOutcome(BaseModel):
 
 
 class QuestionGradeResult(BaseModel):
-    mode: Literal["existing", "objective", "rubric", "holistic", "no_answer"]
+    mode: Literal["existing", "objective", "rubric", "holistic", "asag", "no_answer"]
     attempt_answer_id: str | None = None
     assessment_attempt_id: str | None = None
     assessment_question_id: str | None = None
