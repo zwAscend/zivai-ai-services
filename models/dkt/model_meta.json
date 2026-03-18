@@ -1,0 +1,25 @@
+{
+  "saved_at_utc": "2026-03-05T20:46:38.288227+00:00",
+  "model_type": "dkt_lstm",
+  "skill_map_version": "v1",
+  "skill_map_path": "/workspace/workspace/dkt/update/skill_map_v1.json",
+  "num_skills": 77,
+  "max_len": 50,
+  "stride": 25,
+  "batch_size": 32,
+  "learning_rate": 0.0008,
+  "architecture": {
+    "embedding_dim": 96,
+    "hidden_dim": 192,
+    "lstm_layers": 2,
+    "lstm_dropout": 0.2
+  },
+  "checkpoint_path": "/workspace/workspace/dkt/update/checkpoints/best_dkt_lstm.ckpt",
+  "metrics": {
+    "auc": 0.7075253209417933,
+    "acc": 0.668769716088328,
+    "logloss": 0.6202989529013839
+  },
+  "cloud_checkpoint_path": "/workspace/workspace/dkt/update/dkt_lstm_cloud.ckpt",
+  "edge_mindir_path": "/workspace/workspace/dkt/update/dkt_lstm_edge.mindir"
+}

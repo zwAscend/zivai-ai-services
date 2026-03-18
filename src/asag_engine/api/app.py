@@ -4,7 +4,9 @@ from dotenv import load_dotenv
 from asag_engine.db import init_db
 
 from .agent_routes import bp as agent_bp
+from .asag_routes import bp as asag_bp
 from .dev_routes import bp as dev_bp
+from .dkt_routes import bp as dkt_bp
 from .grading_routes import bp as grading_bp
 from .health_routes import bp as health_bp
 from .llm_routes import bp as llm_bp
@@ -20,7 +22,9 @@ def create_app() -> Flask:
     init_db(auto_create=auto_create)
 
     app.register_blueprint(dev_bp)
+    app.register_blueprint(dkt_bp)
     app.register_blueprint(agent_bp)
+    app.register_blueprint(asag_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(grading_bp)
     app.register_blueprint(llm_bp)
@@ -36,6 +40,9 @@ def create_app() -> Flask:
                 "/api/v1/health",
                 "/api/v1/dev/bootstrap-grading-scenario [POST]",
                 "/api/v1/dev/grading-targets [GET]",
+                "/api/v1/dkt/update [POST]",
+                "/api/v1/dkt/mastery/<student_id> [GET]",
+                "/api/v1/asag/score [POST]",
                 "/api/v1/agents/teacher/assessment-generation [POST]",
                 "/api/v1/agents/teacher/plan-generation [POST]",
                 "/api/v1/agents/student/assessment [POST]",

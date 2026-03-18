@@ -4,7 +4,9 @@ MindSpore-powered AI service for ZivAI. This service is moving beyond standalone
 
 ## Features
 - Local LLM smoke test endpoint
+- ASAG short-answer scoring endpoint
 - Teacher assessment generation endpoint
+- DKT mastery update and mastery lookup endpoints
 - General OCR endpoint for images, scanned PDFs, and digital documents
 - Payload-based per-question grading endpoint
 - Payload-based whole-assessment grading endpoint
@@ -49,7 +51,7 @@ Optional tracked env helper:
 source scripts/export_ai_service_env.sh
 ```
 
-It exposes the current MindSpore runtime defaults plus the Huawei OCR env names used by `/api/v1/agents/ocr/general`.
+It exposes the current MindSpore runtime defaults plus the Huawei OCR and DKT env names used by the AI service routes.
 
 ## Current Recommended Run
 
@@ -74,6 +76,21 @@ export MS_MODE=PYNATIVE_MODE
 export MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
 export MAX_NEW_TOKENS=128
 
+export ASAG_ENABLED=true
+export ASAG_MODEL_DIR="$PWD/models/asag"
+export ASAG_CKPT_PATH="$ASAG_MODEL_DIR/asag_mohler_best.ckpt"
+export ASAG_MINDIR_PATH="$ASAG_MODEL_DIR/asag_mohler.mindir"
+export ASAG_VOCAB_PATH="$ASAG_MODEL_DIR/tokenizer/vocab.json"
+export ASAG_RESULTS_PATH="$ASAG_MODEL_DIR/results.json"
+export ASAG_MAX_LENGTH=256
+export ASAG_SHORT_ANSWER_MAX_MARKS=5
+
+export DKT_MODEL_DIR="$PWD/models/dkt"
+export DKT_CLOUD_CKPT_PATH="$DKT_MODEL_DIR/dkt_lstm_cloud.ckpt"
+export DKT_SKILL_MAP_PATH="$DKT_MODEL_DIR/skill_map_v1.json"
+export DKT_MODEL_META_PATH="$DKT_MODEL_DIR/model_meta.json"
+export DKT_DEFAULT_SUBJECT_CODE="computer_science"
+
 export HWC_AK="<huaweicloud_ak>"
 export HWC_SK="<huaweicloud_sk>"
 export HWC_PROJECT_ID="<huaweicloud_project_id>"
@@ -88,6 +105,7 @@ Notes:
 - `/api/v1/llm/test` is a `POST` route, not a `GET` route.
 - The grading endpoints are also `POST` routes and support optional `dry_run` / `force` flags in the JSON body.
 - `run.sh` already applies the local `mindnlp` import patch needed for this project, so you do not need to edit package files manually.
+- ASAG is optional. If its checkpoint or MindIR is missing or unreadable, grading falls back to the existing LLM path and `/api/v1/asag/score` returns a configuration error until the artifacts are staged in `models/asag/`.
 
 ## Shared Core DB Setup
 
@@ -112,6 +130,9 @@ Important:
 - `GET /api/v1/health`
 - `POST /api/v1/dev/bootstrap-grading-scenario`
 - `GET /api/v1/dev/grading-targets`
+- `POST /api/v1/dkt/update`
+- `GET /api/v1/dkt/mastery/<student_id>`
+- `POST /api/v1/asag/score`
 - `POST /api/v1/agents/teacher/assessment-generation`
 - `POST /api/v1/agents/teacher/plan-generation`
 - `POST /api/v1/agents/student/assessment`
@@ -121,6 +142,37 @@ Important:
 - `POST /api/v1/grade/attempt-answer/<attempt_answer_id>`
 - `POST /api/v1/grade/assessment-attempt/<assessment_attempt_id>`
 - `POST /api/v1/llm/test`
+
+### ASAG Short-Answer Scoring
+
+Route:
+- `POST /api/v1/asag/score`
+
+Use this route to smoke test the MindSpore ASAG regression model directly. It is intended for short-answer questions that have a reference answer.
+
+Request body:
+
+```json
+{
+  "question": "Explain what binary search is.",
+  "reference_answer": "Binary search is a search algorithm for sorted data that checks the middle element and repeatedly halves the search space.",
+  "student_answer": "Binary search checks the middle item in sorted data.",
+  "max_score": 5,
+  "expected_points": [
+    "checks the middle element",
+    "requires sorted data",
+    "halves the search space"
+  ]
+}
+```
+
+Current behavior:
+- raw ASAG output is calibrated from `0-5`
+- the service normalizes it to `0-1`
+- then scales it to `max_score`
+- response includes a feedback band plus lightweight feedback fields
+
+If the checkpoint or MindIR is missing or unreadable, this route returns `503` with a configuration error instead of silently failing.
 
 ### Teacher Assessment Generation
 
@@ -728,6 +780,119 @@ Behavior:
 ## Current State
 - The app is currently running on CPU, so inference latency is still high.
 - `Qwen/Qwen2.5-0.5B-Instruct` is the current active model because it is the best working balance in this environment.
+- The active DKT artifact is `models/dkt/dkt_lstm_cloud.ckpt` with `models/dkt/skill_map_v1.json`.
 - Deprecated standalone ASAG CRUD routes and local persistence models have been removed.
 - Grading now uses shared LMS/AI contracts instead of local SQLite-era tables.
 - Broader AI workflow endpoints beyond grading are still to be built.
+
+## DKT Endpoints
+
+The DKT integration uses the checkpoint and frozen skill map described in `msmodels/workspace/dkt/update/README_DKT_MODEL.md`, but the live service now reads them from `models/dkt/`.
+
+Active artifacts:
+- `models/dkt/dkt_lstm_cloud.ckpt`
+- `models/dkt/skill_map_v1.json`
+- `models/dkt/model_meta.json`
+- `models/dkt/dkt_lstm_edge.mindir` (kept for later edge work, not the primary backend runtime)
+
+### Update student mastery
+
+Route:
+- `POST /api/v1/dkt/update`
+
+Request body:
+
+```json
+{
+  "student_id": "8a93f4a1-4a96-4ba0-a331-56bf8f1a5e18",
+  "subject_code": "computer_science",
+  "events": [
+    {
+      "skill_code": "CS.F3.ALG.DEBUG_ALGORITHMS",
+      "is_correct": 1,
+      "score": 2.0,
+      "max_score": 2.0,
+      "event_time": "2026-03-18T18:00:00Z",
+      "assessment_attempt_id": null,
+      "attempt_answer_id": null
+    }
+  ],
+  "persist": true,
+  "include_mastery_vector": false
+}
+```
+
+Behavior:
+- loads existing `lms.interaction_events` history for the student and subject
+- appends the incoming events
+- runs DKT inference in MindSpore
+- writes:
+  - `lms.interaction_events`
+  - `lms.mastery_snapshots`
+  - `lms.mastery_snapshot_skills`
+  - `lms.student_attributes`
+  - `ai.ai_inference_runs`
+
+Response body:
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "student_id": "8a93f4a1-4a96-4ba0-a331-56bf8f1a5e18",
+    "subject_id": "6f2f68e0-3f55-4a5d-a2e5-0f7ef983f5c5",
+    "subject_code": "computer_science",
+    "average_mastery": 0.612341,
+    "risk_level": "medium",
+    "weak_skills": [
+      {
+        "skill_code": "CS.F3.ALG.DEBUG_ALGORITHMS",
+        "mastery_prob": 0.233114,
+        "skill_name": "Debug algorithms",
+        "skill_id": "f1d8c87d-1dc5-48ad-8bd5-d72f7d2f7af0"
+      }
+    ],
+    "mastery_vector": null,
+    "snapshot_id": "0d2c4b48-2c4d-4d5a-b201-c48be9c30878",
+    "trace_id": "dkt-3f1f3d52bcb24d23",
+    "persisted": true,
+    "events_applied": 1,
+    "ignored_skill_codes": [],
+    "snapshot_time": "2026-03-18T18:01:12.302124Z",
+    "model_name": "DKT Computer Science Form 3-4",
+    "model_version": "2026-03-05T20:46:38.288227+00:00"
+  }
+}
+```
+
+### Get latest student mastery
+
+Route:
+- `GET /api/v1/dkt/mastery/<student_id>?subject_code=computer_science`
+
+Optional query params:
+- `subject_id`
+- `subject_code`
+- `full=true` to include the full mastery vector
+- `refresh=true` to compute from interaction history if no snapshot is present
+
+Response body:
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "student_id": "8a93f4a1-4a96-4ba0-a331-56bf8f1a5e18",
+    "subject_id": "6f2f68e0-3f55-4a5d-a2e5-0f7ef983f5c5",
+    "subject_code": "computer_science",
+    "average_mastery": 0.612341,
+    "risk_level": "medium",
+    "weak_skills": [],
+    "mastery_vector": null,
+    "snapshot_id": "0d2c4b48-2c4d-4d5a-b201-c48be9c30878",
+    "snapshot_time": "2026-03-18T18:01:12.302124Z",
+    "source": "dkt_update",
+    "trace_id": null
+  }
+}
+```

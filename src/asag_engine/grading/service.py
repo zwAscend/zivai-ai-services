@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from asag_engine.asag_model import AsagConfigurationError, AsagInferenceError
+from asag_engine.asag_model.service import score_short_answer, should_use_asag
 from asag_engine.db.shared_models import (
     AiInferenceRun,
     AiModel,
@@ -272,6 +274,19 @@ def _grade_direct_context(
         )
         return _rubric_result_direct(context, context.rubric_items, parsed)
 
+    if should_use_asag(context.question_type_code, context.expected_answer, len(context.rubric_items), context.max_score):
+        try:
+            asag_result = score_short_answer(
+                question=context.question_text,
+                reference_answer=context.expected_answer or "",
+                student_answer=_truncate_student_answer(context.student_answer),
+                max_score=context.max_score,
+                expected_points=context.expected_points,
+            )
+            return _asag_result_direct(context, asag_result)
+        except (AsagConfigurationError, AsagInferenceError) as exc:
+            print(f"[asag] direct grading fallback to holistic: {exc}")
+
     if not options.allow_holistic_fallback:
         raise ValueError("No marking guide is available for this question and holistic fallback is disabled.")
 
@@ -407,6 +422,30 @@ def _grade_question_context(
 
     expected_answer = _extract_correct_answer(context.question.rubric_json)
     expected_points = _extract_expected_points_from_rubric_json(context.question.rubric_json)
+    if should_use_asag(context.question.question_type_code, expected_answer, len(rubric_items), context.max_score):
+        try:
+            asag_result = score_short_answer(
+                question=context.question.stem,
+                reference_answer=expected_answer or "",
+                student_answer=_truncate_student_answer(context.student_answer),
+                max_score=context.max_score,
+                expected_points=expected_points,
+            )
+            result = _asag_result(context, asag_result)
+            if not options.dry_run:
+                trace_id = _persist_asag_inference_run(
+                    session,
+                    context,
+                    expected_answer=expected_answer or "",
+                    expected_points=expected_points,
+                    asag_result=asag_result.model_dump(),
+                )
+                result.trace_id = trace_id
+                _apply_question_result(session, context, result)
+            return result
+        except (AsagConfigurationError, AsagInferenceError) as exc:
+            print(f"[asag] shared grading fallback to holistic: {exc}")
+
     parsed, raw, elapsed, system_text, user_text = grade_holistically(
         context.question.stem,
         context.max_score,
@@ -598,6 +637,29 @@ def _holistic_result(context: GradingContext, parsed) -> QuestionGradeResult:
     )
 
 
+def _asag_result(context: GradingContext, parsed) -> QuestionGradeResult:
+    score_awarded = round(min(float(parsed.scaled_score), context.max_score), 2)
+    missing_points = [point.strip() for point in parsed.missing_points if isinstance(point, str) and point.strip()]
+    return QuestionGradeResult(
+        mode="asag",
+        attempt_answer_id=str(context.answer.id),
+        assessment_attempt_id=str(context.answer.assessment_attempt_id),
+        assessment_question_id=str(context.answer.assessment_question_id),
+        question_id=str(context.question.id),
+        score_awarded=score_awarded,
+        max_score=round(context.max_score, 2),
+        feedback_text=parsed.feedback_text,
+        feedback_summary=parsed.feedback_summary,
+        strengths=list(parsed.strengths),
+        missing_points=missing_points,
+        next_steps=list(parsed.next_steps),
+        confidence=float(parsed.confidence),
+        requires_review=float(parsed.confidence) < REVIEW_CONFIDENCE_THRESHOLD,
+        trace_id=None,
+        rubric_items=[],
+    )
+
+
 def _no_answer_result_direct(context: DirectGradingContext) -> QuestionGradeResult:
     feedback_text = "No answer was submitted. Review the question and provide the key ideas next time."
     missing_points = ["No answer submitted."]
@@ -730,6 +792,29 @@ def _holistic_result_direct(context: DirectGradingContext, parsed) -> QuestionGr
     )
 
 
+def _asag_result_direct(context: DirectGradingContext, parsed) -> QuestionGradeResult:
+    score_awarded = round(min(float(parsed.scaled_score), context.max_score), 2)
+    missing_points = [point.strip() for point in parsed.missing_points if isinstance(point, str) and point.strip()]
+    return QuestionGradeResult(
+        mode="asag",
+        attempt_answer_id=context.attempt_answer_id,
+        assessment_attempt_id=context.assessment_attempt_id,
+        assessment_question_id=context.assessment_question_id,
+        question_id=context.question_id,
+        score_awarded=score_awarded,
+        max_score=round(context.max_score, 2),
+        feedback_text=parsed.feedback_text,
+        feedback_summary=parsed.feedback_summary,
+        strengths=list(parsed.strengths),
+        missing_points=missing_points,
+        next_steps=list(parsed.next_steps),
+        confidence=float(parsed.confidence),
+        requires_review=float(parsed.confidence) < REVIEW_CONFIDENCE_THRESHOLD,
+        trace_id=None,
+        rubric_items=[],
+    )
+
+
 
 def _apply_question_result(session: Session, context: GradingContext, result: QuestionGradeResult) -> None:
     answer = context.answer
@@ -826,7 +911,7 @@ def _persist_inference_run(
     rubric_items: list[RubricDescriptor],
     scheme: LmsMarkingScheme | None,
 ) -> str:
-    model_version = _ensure_model_version(session)
+    model_version = _ensure_llm_model_version(session)
     trace_id = _new_trace_id()
     run = AiInferenceRun(
         trace_id=trace_id,
@@ -871,10 +956,104 @@ def _persist_inference_run(
     return trace_id
 
 
+def _persist_asag_inference_run(
+    session: Session,
+    context: GradingContext,
+    expected_answer: str,
+    expected_points: list[str],
+    asag_result: dict[str, Any],
+) -> str:
+    model_version = _ensure_asag_model_version(session)
+    trace_id = _new_trace_id(prefix="asag")
+    run = AiInferenceRun(
+        trace_id=trace_id,
+        model_version_id=model_version.id,
+        school_id=context.school_id,
+        student_id=context.student_id,
+        assessment_attempt_id=context.answer.assessment_attempt_id,
+        attempt_answer_id=context.answer.id,
+        prompt_text=None,
+        context_json={
+            "mode": "asag",
+            "question_id": str(context.question.id),
+            "assessment_question_id": str(context.answer.assessment_question_id),
+            "question_type_code": context.question.question_type_code,
+            "max_score": context.max_score,
+            "expected_points": expected_points,
+        },
+        rubric_scheme_id=context.assessment_question.rubric_scheme_id,
+        rubric_scheme_version=context.assessment_question.rubric_scheme_version,
+        request_json={
+            "question": context.question.stem,
+            "reference_answer": expected_answer,
+            "student_answer": _truncate_student_answer(context.student_answer),
+        },
+        response_json=asag_result,
+        latency_ms=None,
+        created_at=_utcnow(),
+    )
+    session.add(run)
+    session.flush()
+    return trace_id
 
-def _ensure_model_version(session: Session) -> AiModelVersion:
+
+def _ensure_llm_model_version(session: Session) -> AiModelVersion:
     model_name = os.getenv("MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
     version_name = os.getenv("MODEL_VERSION", model_name)
+    stmt = (
+        select(AiModelVersion)
+        .join(AiModel, AiModelVersion.model_id == AiModel.id)
+        .where(
+            AiModel.name == model_name,
+            AiModel.model_type == "llm",
+            AiModel.deleted_at.is_(None),
+            AiModelVersion.version == version_name,
+            AiModelVersion.deleted_at.is_(None),
+        )
+    )
+    model_version = session.execute(stmt).scalar_one_or_none()
+    if model_version is not None:
+        return model_version
+
+    model_stmt = select(AiModel).where(
+        AiModel.name == model_name,
+        AiModel.model_type == "llm",
+        AiModel.deleted_at.is_(None),
+    )
+    model = session.execute(model_stmt).scalar_one_or_none()
+    if model is None:
+        model = AiModel(
+            name=model_name,
+            model_type="llm",
+            description="MindSpore/MindNLP grading model",
+            is_active=True,
+        )
+        session.add(model)
+        session.flush()
+
+    model_version = AiModelVersion(
+        model_id=model.id,
+        version=version_name,
+        artifact_uri=f"huggingface://{model_name}",
+        metrics=None,
+        config={
+            "provider": os.getenv("LLM_PROVIDER", "mindnlp"),
+            "ms_mode": os.getenv("MS_MODE", "GRAPH_MODE"),
+            "device_target": os.getenv("MS_DEVICE_TARGET", "CPU"),
+            "max_new_tokens": os.getenv("MAX_NEW_TOKENS", "128"),
+        },
+        is_active=True,
+    )
+    session.add(model_version)
+    session.flush()
+    return model_version
+
+
+def _ensure_asag_model_version(session: Session) -> AiModelVersion:
+    model_name = os.getenv("ASAG_MODEL_NAME", "asag_mohler")
+    version_name = os.getenv("ASAG_MODEL_VERSION", "asag_mohler_best")
+    artifact_uri = os.getenv("ASAG_CKPT_PATH") or os.getenv("ASAG_MINDIR_PATH") or os.getenv("ASAG_MODEL_DIR", "models/asag")
+
     stmt = (
         select(AiModelVersion)
         .join(AiModel, AiModelVersion.model_id == AiModel.id)
@@ -900,7 +1079,7 @@ def _ensure_model_version(session: Session) -> AiModelVersion:
         model = AiModel(
             name=model_name,
             model_type="asag",
-            description="MindSpore/MindNLP grading model",
+            description="MindSpore short-answer regression model",
             is_active=True,
         )
         session.add(model)
@@ -909,13 +1088,13 @@ def _ensure_model_version(session: Session) -> AiModelVersion:
     model_version = AiModelVersion(
         model_id=model.id,
         version=version_name,
-        artifact_uri=f"huggingface://{model_name}",
+        artifact_uri=artifact_uri,
         metrics=None,
         config={
-            "provider": os.getenv("LLM_PROVIDER", "mindnlp"),
-            "ms_mode": os.getenv("MS_MODE", "GRAPH_MODE"),
-            "device_target": os.getenv("MS_DEVICE_TARGET", "CPU"),
-            "max_new_tokens": os.getenv("MAX_NEW_TOKENS", "128"),
+            "provider": "mindspore",
+            "artifact_dir": os.getenv("ASAG_MODEL_DIR", "models/asag"),
+            "max_length": os.getenv("ASAG_MAX_LENGTH", "256"),
+            "raw_score_max": os.getenv("ASAG_RAW_SCORE_MAX", "5.0"),
         },
         is_active=True,
     )
@@ -1250,8 +1429,8 @@ def _as_text(value: Any) -> str | None:
 
 
 
-def _new_trace_id() -> str:
-    return f"asag-{uuid4().hex}"
+def _new_trace_id(prefix: str = "asag") -> str:
+    return f"{prefix}-{uuid4().hex}"
 
 
 
