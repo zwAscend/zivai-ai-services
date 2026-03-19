@@ -1,13 +1,31 @@
+import json
+
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
 
-from asag_engine.agents.schema import AssessmentGenerationRequest, PlanGenerationRequest
+from asag_engine.agents.schema import (
+    AssessmentGenerationRequest,
+    PlanGenerationRequest,
+    StudentChallengeGenerationRequest,
+    StudentTutorRequest,
+    TeacherPracticeGenerationRequest,
+    TeacherResourceGenerationRequest,
+)
 from asag_engine.agents.service import (
     AssessmentGenerationError,
     generate_teacher_assessment_questions,
     generate_teacher_development_plan,
+    generate_teacher_practice,
+    generate_teacher_resource,
 )
-from asag_engine.agents.student_assessment import assess_student_file, assess_student_text
+from asag_engine.agents.student_assessment import (
+    assess_student_file,
+    assess_student_payload,
+    assess_student_text,
+    extract_student_file_submission,
+)
+from asag_engine.agents.student_support import generate_student_challenge, generate_student_tutor_response
+from asag_engine.grading.schema import QuestionGradePayload
 from asag_engine.grading.llm_client import build_llm_client
 from asag_engine.ocr.service import OcrConfigurationError, OcrProcessingError, OcrValidationError
 
@@ -45,6 +63,50 @@ def teacher_assessment_generation():
         return _error_response("Internal assessment generation error", str(exc), 500)
 
 
+@bp.post("/api/v1/agents/teacher/resource-generation")
+def teacher_resource_generation():
+    try:
+        payload = TeacherResourceGenerationRequest.model_validate(request.get_json(silent=True) or {})
+        resource = generate_teacher_resource(payload, llm_client=_llm)
+        return jsonify(resource.model_dump()), 200
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
+    except AssessmentGenerationError as exc:
+        return _error_response(
+            "Model returned invalid resource generation output",
+            str(exc),
+            422,
+            extra={
+                "first_pass_preview": " ".join((exc.first_raw or "").split())[:320],
+                "retry_preview": " ".join((exc.retry_raw or "").split())[:320],
+            },
+        )
+    except Exception as exc:
+        return _error_response("Internal resource generation error", str(exc), 500)
+
+
+@bp.post("/api/v1/agents/teacher/practice-generation")
+def teacher_practice_generation():
+    try:
+        payload = TeacherPracticeGenerationRequest.model_validate(request.get_json(silent=True) or {})
+        practice = generate_teacher_practice(payload, llm_client=_llm)
+        return jsonify(practice.model_dump()), 200
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
+    except AssessmentGenerationError as exc:
+        return _error_response(
+            "Model returned invalid practice generation output",
+            str(exc),
+            422,
+            extra={
+                "first_pass_preview": " ".join((exc.first_raw or "").split())[:320],
+                "retry_preview": " ".join((exc.retry_raw or "").split())[:320],
+            },
+        )
+    except Exception as exc:
+        return _error_response("Internal practice generation error", str(exc), 500)
+
+
 @bp.post("/api/v1/agents/teacher/plan-generation")
 def teacher_plan_generation():
     try:
@@ -70,22 +132,56 @@ def teacher_plan_generation():
 @bp.post("/api/v1/agents/student/assessment")
 def student_assessment():
     try:
+        payload = None
+        raw_request = request.form.get("request")
+        if raw_request:
+            payload = QuestionGradePayload.model_validate(json.loads(raw_request))
+
         module = (request.form.get("module") or request.args.get("module") or "").strip()
+        uploaded = request.files.get("file")
+        text = (request.form.get("text") or "").strip()
+        if not module and payload is not None:
+            module = (payload.question.topic or payload.question.subject or "Assessment").strip()
+
         if not module:
             return _error_response("Invalid request body", "module is required", 400)
 
-        uploaded = request.files.get("file")
-        text = (request.form.get("text") or "").strip()
-
         if uploaded and uploaded.filename:
-            result = assess_student_file(module=module, file_storage=uploaded, llm_client=_llm)
+            if payload is not None:
+                extracted = extract_student_file_submission(module=module, file_storage=uploaded)
+                payload = payload.model_copy(deep=True)
+                payload.student_answer.text = extracted["markdown"]
+                result = assess_student_payload(
+                    payload=payload,
+                    module=module,
+                    llm_client=_llm,
+                    filename=extracted["filename"],
+                    content_type=extracted["content_type"],
+                    ocr_type=extracted["ocr_type"],
+                    pages=extracted["pages"],
+                )
+            else:
+                result = assess_student_file(module=module, file_storage=uploaded, llm_client=_llm)
             return jsonify(result.model_dump()), 200
 
         if text:
-            result = assess_student_text(module=module, text=text, llm_client=_llm, ocr_type="text")
+            if payload is not None:
+                payload = payload.model_copy(deep=True)
+                payload.student_answer.text = text
+                result = assess_student_payload(payload=payload, module=module, llm_client=_llm, ocr_type="text")
+            else:
+                result = assess_student_text(module=module, text=text, llm_client=_llm, ocr_type="text")
             return jsonify(result.model_dump()), 200
 
-        return _error_response("Invalid request body", "Provide either text or file.", 400)
+        if payload is not None and payload.student_answer.text:
+            result = assess_student_payload(payload=payload, module=module, llm_client=_llm)
+            return jsonify(result.model_dump()), 200
+
+        return _error_response("Invalid request body", "Provide either text or file, or include student_answer.text in request.", 400)
+    except json.JSONDecodeError as exc:
+        return _error_response("Invalid request body", str(exc), 400)
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
     except OcrValidationError as exc:
         return _error_response("Invalid OCR request", str(exc), 400)
     except OcrConfigurationError as exc:
@@ -94,3 +190,27 @@ def student_assessment():
         return _error_response("OCR processing error", str(exc), 502)
     except Exception as exc:
         return _error_response("Internal student assessment error", str(exc), 500)
+
+
+@bp.post("/api/v1/agents/student/tutor")
+def student_tutor():
+    try:
+        payload = StudentTutorRequest.model_validate(request.get_json(silent=True) or {})
+        response = generate_student_tutor_response(payload, llm_client=_llm)
+        return jsonify(response.model_dump()), 200
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
+    except Exception as exc:
+        return _error_response("Internal student tutor error", str(exc), 500)
+
+
+@bp.post("/api/v1/agents/student/challenge-generation")
+def student_challenge_generation():
+    try:
+        payload = StudentChallengeGenerationRequest.model_validate(request.get_json(silent=True) or {})
+        response = generate_student_challenge(payload, llm_client=_llm)
+        return jsonify(response.model_dump()), 200
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
+    except Exception as exc:
+        return _error_response("Internal student challenge generation error", str(exc), 500)

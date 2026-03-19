@@ -14,6 +14,8 @@ from asag_engine.agents.schema import (
     StudentAssessmentQuestionDetail,
     StudentAssessmentResponse,
 )
+from asag_engine.grading.schema import QuestionGradePayload
+from asag_engine.grading.service import grade_payload_question
 from asag_engine.ocr.schema import OcrGeneralRequest, OcrGeneralResponse
 from asag_engine.ocr.service import extract_general_ocr
 
@@ -107,6 +109,19 @@ def assess_student_text(
 
 
 def assess_student_file(*, module: str, file_storage, llm_client) -> StudentAssessmentResponse:
+    extracted = extract_student_file_submission(module=module, file_storage=file_storage)
+    return assess_student_text(
+        module=module,
+        text=extracted["markdown"],
+        llm_client=llm_client,
+        filename=extracted["filename"],
+        content_type=extracted["content_type"],
+        ocr_type=extracted["ocr_type"],
+        pages=extracted["pages"],
+    )
+
+
+def extract_student_file_submission(*, module: str, file_storage) -> dict[str, Any]:
     ocr_result = extract_general_ocr(
         [file_storage],
         OcrGeneralRequest(
@@ -119,24 +134,117 @@ def assess_student_file(*, module: str, file_storage, llm_client) -> StudentAsse
     )
     markdown = ocr_result.combinedText.strip()
     first_document = ocr_result.documents[0] if ocr_result.documents else None
-    return assess_student_text(
-        module=module,
-        text=markdown,
-        llm_client=llm_client,
-        filename=getattr(file_storage, "filename", None),
-        content_type=getattr(file_storage, "mimetype", None),
-        ocr_type=(first_document.mode if first_document else None),
-        pages=len(ocr_result.documents) or None,
+    return {
+        "markdown": markdown,
+        "filename": getattr(file_storage, "filename", None),
+        "content_type": getattr(file_storage, "mimetype", None),
+        "ocr_type": (first_document.mode if first_document else None),
+        "pages": len(ocr_result.documents) or None,
+    }
+
+
+def assess_student_payload(
+    *,
+    payload: QuestionGradePayload,
+    llm_client,
+    module: str | None = None,
+    filename: str | None = None,
+    content_type: str | None = None,
+    ocr_type: str | None = None,
+    pages: int | None = None,
+) -> StudentAssessmentResponse:
+    teacher_result = grade_payload_question(payload, llm_client=llm_client)
+    student_answer = (payload.student_answer.text or "").strip()
+    module_name = (module or payload.question.topic or payload.question.subject or "Assessment").strip()
+    total = max(0.0, float(teacher_result.max_score))
+    achieved = max(0.0, min(float(teacher_result.score_awarded), total))
+    ratio = achieved / total if total > 0 else 0.0
+
+    strengths = [item.strip() for item in teacher_result.strengths if isinstance(item, str) and item.strip()][:3]
+    missing_points = [item.strip() for item in teacher_result.missing_points if isinstance(item, str) and item.strip()][:3]
+    next_steps = [item.strip() for item in teacher_result.next_steps if isinstance(item, str) and item.strip()][:3]
+
+    if ratio >= 0.85:
+        overall_feedback = "You answered this question well and showed a strong understanding of the key idea."
+    elif ratio >= 0.6:
+        overall_feedback = "You showed a reasonable understanding, but you still need to make your answer more complete and precise."
+    elif ratio > 0:
+        overall_feedback = "You included some relevant ideas, but you missed important parts of the answer."
+    else:
+        overall_feedback = "You need to revisit this question and focus on the main idea before trying again."
+
+    if teacher_result.feedback_text.strip():
+        overall_feedback = teacher_result.feedback_text.strip().replace("The student", "You").replace("Student", "You")
+
+    if not strengths:
+        if ratio >= 0.7:
+            strengths = ["You included several correct ideas from the question."]
+        elif ratio > 0:
+            strengths = ["You attempted the question and included at least one relevant point."]
+
+    improvements = next_steps or [f"Add this missing idea: {point}" for point in missing_points]
+    if not improvements:
+        improvements = ["Review the expected points and answer again using clearer detail."]
+
+    criteria = [
+        StudentAssessmentCriterion(
+            criterion="Accuracy",
+            score=round(achieved, 2),
+            feedback="You included several correct ideas in your answer." if ratio >= 0.7 else "You need to make your answer more accurate and precise.",
+        ),
+        StudentAssessmentCriterion(
+            criterion="Coverage",
+            score=round(total if not missing_points else max(total * 0.4, achieved), 2),
+            feedback="You covered most of the important parts of the question." if len(missing_points) <= 1 else "You still need to cover more of the important points in the question.",
+        ),
+        StudentAssessmentCriterion(
+            criterion="Next steps",
+            score=round(total if not improvements else max(total * 0.6, achieved), 2),
+            feedback="You are close to a complete answer." if ratio >= 0.7 else "Use the improvement steps to make your answer stronger next time.",
+        ),
+    ]
+
+    detail = StudentAssessmentQuestionDetail(
+        max_marks=round(total, 2),
+        awarded_marks=round(achieved, 2),
+        feedback=overall_feedback,
+        improvement=improvements[0] if improvements else "Review the key point you missed and answer again.",
+    )
+    assessment = StudentAssessmentData(
+        is_correct_module=achieved > 0,
+        confidence_assessment_score=round(float(teacher_result.confidence or 0.7), 4),
+        total_possible_marks=round(total, 2),
+        marks_achieved=round(achieved, 2),
+        marks_percentage=round((achieved / total) * 100, 2) if total > 0 else 0.0,
+        overall_feedback=overall_feedback,
+        strengths=strengths,
+        improvements=improvements,
+        criteria=criteria,
+        assessment_details={"question_1": detail},
+        detected_module=module_name,
+        mark_consistency_check="consistent",
+        marking_scheme_used=bool(payload.marking_guide and payload.marking_guide.rubric_items),
+    )
+    return StudentAssessmentResponse(
+        module=module_name,
+        filename=filename,
+        content_type=content_type,
+        ocr_type=ocr_type,
+        markdown=student_answer,
+        pages=pages,
+        assessment=assessment,
     )
 
 
 def _build_student_assessment_prompt(module: str, text: str) -> tuple[str, str]:
-    system_text = """You are an AI assessment assistant for Computer Science student practice.
+    system_text = """You are an AI assessment assistant for secondary-school student practice.
 Assess whether the student's response is relevant to the declared module and estimate the quality of understanding.
 Return JSON ONLY. No markdown. No prose outside JSON.
 
 Rules:
 - Use the declared module as the reference topic.
+- Default to ZIMSEC O Level high-school expectations unless the input explicitly requests another level.
+- Do not treat the response as tertiary or university-level work.
 - If the answer is unrelated to the module, set is_correct_module to false and award very low marks.
 - total_possible_marks must be 10.
 - marks_achieved must be between 0 and 10.

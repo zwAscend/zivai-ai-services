@@ -91,6 +91,7 @@ class DirectGradingContext:
     max_score: float
     student_answer: str | None
     question_type_code: str | None = None
+    subject_name: str | None = None
     expected_answer: str | None = None
     expected_points: list[str] = field(default_factory=list)
     rubric_items: list[RubricDescriptor] = field(default_factory=list)
@@ -219,6 +220,7 @@ def _build_direct_context(payload: QuestionGradePayload) -> DirectGradingContext
         max_score=float(payload.question.max_marks),
         student_answer=(payload.student_answer.text or "").strip() or None,
         question_type_code=(payload.question.question_type or "").strip() or None,
+        subject_name=(payload.question.subject or "").strip() or None,
         expected_answer=(guide.expected_answer or "").strip() or None,
         expected_points=expected_points,
         rubric_items=[
@@ -271,6 +273,7 @@ def _grade_direct_context(
             ],
             _truncate_student_answer(context.student_answer),
             llm_client,
+            subject_name=context.subject_name,
         )
         return _rubric_result_direct(context, context.rubric_items, parsed)
 
@@ -295,6 +298,7 @@ def _grade_direct_context(
         context.max_score,
         _truncate_student_answer(context.student_answer),
         llm_client,
+        subject_name=context.subject_name,
         expected_answer=context.expected_answer,
         expected_points=context.expected_points,
     )
@@ -401,6 +405,7 @@ def _grade_question_context(
             ],
             _truncate_student_answer(context.student_answer),
             llm_client,
+            subject_name=getattr(context.assessment.subject, "name", None),
         )
         result = _rubric_result(context, rubric_items, parsed)
         if not options.dry_run:
@@ -451,6 +456,7 @@ def _grade_question_context(
         context.max_score,
         _truncate_student_answer(context.student_answer),
         llm_client,
+        subject_name=getattr(context.assessment.subject, "name", None),
         expected_answer=expected_answer,
         expected_points=expected_points,
     )

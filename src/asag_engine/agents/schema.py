@@ -15,7 +15,8 @@ class ReferenceDocument(BaseModel):
 class AssessmentGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    context: str = Field(default="Generate a well-structured Computer Science assessment.")
+    context: str = Field(default="Generate a well-structured assessment.")
+    subjectName: str | None = None
     difficulty: Literal["easy", "medium", "hard"] = "medium"
     questionTypes: Literal["multiple_choice", "structured", "mixed"] = "multiple_choice"
     numberOfQuestions: int = Field(default=5, ge=1, le=20)
@@ -27,7 +28,7 @@ class AssessmentGenerationRequest(BaseModel):
     @classmethod
     def _normalize_context(cls, value: Any) -> str:
         text = "" if value is None else str(value).strip()
-        return text or "Generate a well-structured Computer Science assessment."
+        return text or "Generate a well-structured assessment."
 
     @field_validator("attributes", mode="before")
     @classmethod
@@ -47,6 +48,57 @@ class AssessmentGenerationRequest(BaseModel):
             return [str(item).strip() for item in value if str(item).strip()]
         text = str(value).strip()
         return [text] if text else []
+
+
+class TeacherResourceGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    subjectName: str | None = None
+    topicTitle: str = Field(..., min_length=1)
+    unitTitle: str | None = None
+    gradeLevel: str | None = None
+    contentType: Literal["resource", "practice"] = "resource"
+    title: str | None = None
+    objective: str | None = None
+    teacherPrompt: str | None = None
+    existingContent: str | None = None
+    variant: bool = False
+    relatedRecords: list[str] = Field(default_factory=list)
+    referenceDocuments: list[ReferenceDocument] = Field(default_factory=list)
+
+
+class TeacherPracticeExistingQuestion(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    prompt: str | None = None
+    questionType: Literal["multiple-choice", "short-answer"] | None = None
+    type: Literal["multiple-choice", "short-answer"] | None = None
+    marks: int = Field(default=1, ge=1, le=20)
+    options: list[str] = Field(default_factory=list)
+    correctAnswers: list[str] = Field(default_factory=list)
+    correctAnswer: str | None = None
+    markingGuide: str | None = None
+
+
+class TeacherPracticeGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    subjectName: str | None = None
+    topicTitle: str = Field(..., min_length=1)
+    unitTitle: str | None = None
+    gradeLevel: str | None = None
+    title: str | None = None
+    objective: str | None = None
+    teacherPrompt: str | None = None
+    description: str | None = None
+    practiceType: Literal["quiz", "assignment", "test", "project", "exam"] = "quiz"
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    questionTypeMode: Literal["multiple_choice", "structured", "mixed"] = "mixed"
+    numberOfQuestions: int = Field(default=5, ge=1, le=20)
+    variant: bool = False
+    relatedRecords: list[str] = Field(default_factory=list)
+    existingQuestions: list[TeacherPracticeExistingQuestion] = Field(default_factory=list)
+    referenceDocuments: list[ReferenceDocument] = Field(default_factory=list)
 
 
 class GeneratedRubricItem(BaseModel):
@@ -79,6 +131,39 @@ class GeneratedAssessmentQuestion(BaseModel):
     rubricJson: dict[str, Any] = Field(default_factory=dict)
     referenceFallbackUsed: bool = False
     sourceDocumentsUsed: list[str] = Field(default_factory=list)
+
+
+class GeneratedTeacherResource(BaseModel):
+    title: str = Field(..., min_length=1)
+    contentHtml: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1)
+    teacherMessage: str = Field(..., min_length=1)
+    sourceDocumentsUsed: list[str] = Field(default_factory=list)
+    referenceFallbackUsed: bool = False
+
+
+class GeneratedTeacherPracticeQuestion(BaseModel):
+    id: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    type: Literal["multiple-choice", "short-answer"]
+    marks: int = Field(default=1, ge=1, le=20)
+    options: list[str] = Field(default_factory=list)
+    correctAnswers: list[str] = Field(default_factory=list)
+    correctAnswer: str = ""
+    markingGuide: str = ""
+
+
+class GeneratedTeacherPractice(BaseModel):
+    title: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    practiceType: Literal["quiz", "assignment", "test", "project", "exam"] = "quiz"
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    numberOfQuestions: int = Field(..., ge=1, le=20)
+    questions: list[GeneratedTeacherPracticeQuestion] = Field(default_factory=list)
+    summary: str = Field(..., min_length=1)
+    teacherMessage: str = Field(..., min_length=1)
+    sourceDocumentsUsed: list[str] = Field(default_factory=list)
+    referenceFallbackUsed: bool = False
 
 
 class LegacyPlanAttributeDetail(BaseModel):
@@ -261,3 +346,90 @@ class StudentAssessmentResponse(BaseModel):
     file_id: str | None = None
     file_url: str | None = None
     view_url: str | None = None
+
+
+class StudentTutorMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    role: Literal["student", "assistant"] = "student"
+    text: str = Field(..., min_length=1)
+
+
+class StudentMasteryTopic(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    topicId: str | None = None
+    title: str = Field(..., min_length=1)
+    masteryPercent: float = Field(default=0.0, ge=0, le=100)
+    questionCount: int = Field(default=0, ge=0)
+    priority: int | None = Field(default=None, ge=1)
+
+
+class StudentTutorRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    studentId: str | None = None
+    subjectId: str | None = None
+    subjectName: str | None = None
+    unitTitle: str | None = None
+    topicTitle: str | None = None
+    planTitle: str | None = None
+    planStepTitle: str | None = None
+    coachMode: Literal["socratic", "hint"] = "socratic"
+    latestMessage: str = Field(..., min_length=1)
+    taskGoal: str | None = None
+    reasoningCanvas: str | None = None
+    messages: list[StudentTutorMessage] = Field(default_factory=list)
+    referenceDocuments: list[ReferenceDocument] = Field(default_factory=list)
+    masteryTopics: list[StudentMasteryTopic] = Field(default_factory=list)
+
+    @field_validator("latestMessage", mode="before")
+    @classmethod
+    def _normalize_latest_message(cls, value: Any) -> str:
+        text = "" if value is None else str(value).strip()
+        if not text:
+            raise ValueError("latestMessage is required")
+        return text
+
+
+class StudentTutorResponse(BaseModel):
+    reply: str = Field(..., min_length=1)
+    suggestedNextAction: str | None = None
+    followUpQuestion: str | None = None
+
+
+class StudentChallengeQuestion(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(..., min_length=1)
+    type: Literal["input", "single", "multiple"] = "input"
+    prompt: str = Field(..., min_length=1)
+    helpText: str | None = None
+    options: list[str] = Field(default_factory=list)
+    acceptedAnswers: list[str] = Field(default_factory=list)
+    correctOptionIndexes: list[int] = Field(default_factory=list)
+
+
+class StudentChallengeGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    studentId: str | None = None
+    subjectId: str | None = None
+    subjectName: str = Field(..., min_length=1)
+    mode: Literal["topic_challenge", "subject_challenge"] = "topic_challenge"
+    unitTitle: str | None = None
+    topicTitle: str | None = None
+    questionCount: int = Field(default=10, ge=1, le=40)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    objective: str | None = None
+    referenceDocuments: list[ReferenceDocument] = Field(default_factory=list)
+    masteryTopics: list[StudentMasteryTopic] = Field(default_factory=list)
+
+
+class StudentChallengeGenerationResponse(BaseModel):
+    challengeId: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1)
+    coachMessage: str = Field(..., min_length=1)
+    focusTopics: list[str] = Field(default_factory=list)
+    questions: list[StudentChallengeQuestion] = Field(default_factory=list)
