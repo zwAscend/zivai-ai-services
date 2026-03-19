@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import html
+import math
 from typing import Any, Iterable
 
 from .schema import (
@@ -13,9 +15,14 @@ from .schema import (
     GeneratedPlanSkill,
     GeneratedPlanStep,
     GeneratedPlanSubskill,
+    GeneratedTeacherPractice,
+    GeneratedTeacherPracticeQuestion,
+    GeneratedTeacherResource,
     GeneratedRubricItem,
     PlanGenerationRequest,
     ReferenceDocument,
+    TeacherPracticeGenerationRequest,
+    TeacherResourceGenerationRequest,
 )
 
 
@@ -97,21 +104,26 @@ def _build_assessment_generation_prompt(
     request: AssessmentGenerationRequest,
     prepared_docs: ReferencePreparationResult,
 ) -> tuple[str, str]:
-    system_text = """You are an assessment generation assistant for Computer Science teachers.
-Generate classroom-ready assessment questions and their marking guides.
+    subject_name = _resolve_assessment_subject_name(request)
+    system_text = (
+        f"You are an assessment generation assistant for teachers of {subject_name}.\n"
+        + """Generate classroom-ready assessment questions and their marking guides.
 Return JSON ONLY. No markdown. No prose outside JSON.
 
 Rules:
 - Produce exactly the requested number of questions.
+- Default to ZIMSEC O Level high-school expectations unless the input explicitly requests another level.
+- Do not generate tertiary, university, or advanced specialist content.
 - Supported output question types are: multiple_choice, true_false, short_answer, essay.
 - multiple_choice questions must have 4 plausible options and correctAnswer must exactly match one option text.
 - true_false questions must use options [\"True\", \"False\"] and correctAnswer must be exactly one of them.
 - short_answer and essay questions must include a concise expectedAnswer and rubricItems.
 - Every question must include an explanation that works as a teacher-facing marking guide summary.
 - If reference documents are provided and useful, use them.
-- If reference documents are missing, empty, incomplete, or not useful, silently fall back to the provided context, attributes, tags, and your own general Computer Science knowledge.
+- If reference documents are missing, empty, incomplete, or not useful, silently fall back to the provided context, attributes, tags, and your own general knowledge of {subject_name}.
 - Never refuse generation because documents are missing.
 - Keep output concise and practical for classroom use.
+- Keep every question anchored to {subject_name}. Do not drift into another subject.
 
 Return exactly this schema:
 {
@@ -123,7 +135,7 @@ Return exactly this schema:
       \"correctAnswer\": \"exact option text\",
       \"explanation\": \"teacher-facing marking guide summary\",
       \"difficulty\": \"medium\",
-      \"tags\": [\"Algorithms\"],
+      \"tags\": [\"Key concept\"],
       \"points\": 1,
       \"expectedAnswer\": \"...\",
       \"rubricItems\": [
@@ -133,9 +145,11 @@ Return exactly this schema:
     }
   ]
 }"""
+    ).replace("{subject_name}", subject_name)
 
     user_obj = {
         "task": "Generate assessment questions with marking guides.",
+        "subject_name": subject_name,
         "question_type_mode": request.questionTypes,
         "question_type_plan": _build_question_type_plan(request.questionTypes, request.numberOfQuestions),
         "number_of_questions": request.numberOfQuestions,
@@ -189,6 +203,26 @@ def _normalize_attributes_for_prompt(attributes: dict[str, Any]) -> dict[str, st
             rendered = _collapse_whitespace(str(value))
         normalized[name] = rendered or name
     return normalized
+
+
+def _resolve_assessment_subject_name(request: AssessmentGenerationRequest) -> str:
+    explicit = _collapse_whitespace(str(request.subjectName or ""))
+    if explicit:
+        return explicit
+    attribute_names = [
+        _collapse_whitespace(str(name))
+        for name in request.attributes.keys()
+        if _collapse_whitespace(str(name))
+    ]
+    lowered = {name.lower(): name for name in attribute_names}
+    for candidate in ("english language", "mathematics", "computer science", "biology", "chemistry", "physics", "history", "geography"):
+        if candidate in lowered:
+            return lowered[candidate]
+    tag_names = [_collapse_whitespace(str(tag)) for tag in request.tags if _collapse_whitespace(str(tag))]
+    for tag in tag_names:
+        if " " in tag or tag.lower() in lowered:
+            return tag
+    return "the subject"
 
 
 def _build_question_type_plan(question_type_mode: str, count: int) -> list[str]:
@@ -666,6 +700,364 @@ def _preview(value: str, limit: int = 320) -> str:
     return _collapse_whitespace(value)[:limit]
 
 
+def _parse_json_candidate(raw_text: str) -> Any:
+    decoder = json.JSONDecoder()
+    candidates: list[Any] = []
+
+    for index, char in enumerate(raw_text):
+        if char not in "[{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(raw_text[index:])
+        except json.JSONDecodeError:
+            continue
+        candidates.append(obj)
+
+    if not candidates:
+        raise ValueError("Model output did not contain JSON")
+    return candidates[-1]
+
+
+def _sanitize_generated_html(raw_html: str) -> str:
+    html_value = _collapse_whitespace(raw_html).replace("</p><p>", "</p>\n<p>")
+    html_value = re.sub(r"</?(?:html|body|script|style)[^>]*>", "", html_value, flags=re.IGNORECASE)
+    return html_value.strip()
+
+
+def _fallback_resource_html(
+    request: TeacherResourceGenerationRequest,
+    source_doc_names: list[str],
+    fallback_used: bool,
+) -> GeneratedTeacherResource:
+    title = _collapse_whitespace(request.title or f"{request.topicTitle} {request.contentType.title()}").strip()
+    objective = _collapse_whitespace(request.objective or f"Build mastery in {request.topicTitle}")
+    teacher_prompt = _collapse_whitespace(request.teacherPrompt or "Generate a clear, classroom-ready draft.")
+    subject_name = _collapse_whitespace(request.subjectName or "the subject")
+    grade_level = _collapse_whitespace(request.gradeLevel or "Form 4")
+    variant_note = (
+        "<p><strong>Variation:</strong> This version uses a slightly different explanation flow and learner task structure.</p>"
+        if request.variant
+        else ""
+    )
+    content_html = f"""
+<h1>{html.escape(title)}</h1>
+<p><strong>Subject:</strong> {html.escape(subject_name)} | <strong>Grade level:</strong> {html.escape(grade_level)}</p>
+<p><strong>Topic:</strong> {html.escape(request.topicTitle)}</p>
+<p><strong>Learning objective:</strong> {html.escape(objective)}</p>
+{variant_note}
+<h2>Overview</h2>
+<p>This resource introduces <strong>{html.escape(request.topicTitle)}</strong> using clear classroom language and direct teaching points that the teacher can adapt during instruction.</p>
+<h2>Teach It</h2>
+<p>Start by defining the key idea, then connect it to one practical example drawn from {html.escape(subject_name)}. Keep the explanation concise and check understanding after each section.</p>
+<ul>
+  <li>Explain the main concept in one clear paragraph.</li>
+  <li>Use one worked example linked to the topic.</li>
+  <li>Highlight one common misconception learners may have.</li>
+</ul>
+<h2>Learner Check</h2>
+<ol>
+  <li>Ask learners to restate the concept in their own words.</li>
+  <li>Give a short application prompt based on the topic.</li>
+  <li>Review answers and correct misunderstandings immediately.</li>
+</ol>
+<h2>Teacher Notes</h2>
+<p>Use the collaborator direction below to refine or extend the draft:</p>
+<blockquote>{html.escape(teacher_prompt)}</blockquote>
+""".strip()
+    return GeneratedTeacherResource(
+        title=title,
+        contentHtml=_sanitize_generated_html(content_html),
+        summary=f"Generated a {request.contentType} draft for {request.topicTitle} with a classroom-ready structure.",
+        teacherMessage=(
+            "I generated a resource draft you can edit, expand, or publish."
+            if not fallback_used
+            else "I generated a fallback resource draft using the topic context because no strong reference source was available."
+        ),
+        sourceDocumentsUsed=source_doc_names,
+        referenceFallbackUsed=fallback_used,
+    )
+
+
+def generate_teacher_resource(
+    request: TeacherResourceGenerationRequest,
+    *,
+    llm_client,
+) -> GeneratedTeacherResource:
+    prepared_docs = _prepare_reference_documents(request.referenceDocuments)
+    source_doc_names = [doc["documentName"] for doc in prepared_docs.usable_documents]
+    fallback = _fallback_resource_html(request, source_doc_names, prepared_docs.fallback_used)
+
+    subject_name = _collapse_whitespace(request.subjectName or "the requested subject")
+    system_text = (
+        f"You are an AI assistant that generates teacher workspace resources for {subject_name}.\n"
+        + """Return JSON ONLY. No markdown fences. No prose outside JSON.
+
+Rules:
+- contentHtml must contain valid classroom-ready HTML only.
+- Use concise semantic tags such as h1, h2, h3, p, ul, ol, li, table, thead, tbody, tr, th, td, blockquote, pre, code, strong, em.
+- Do not include script, style, html, or body tags.
+- Default to ZIMSEC O Level high-school expectations unless the input explicitly requests another level.
+- Do not generate tertiary, university, or advanced specialist content.
+- The content should be ready to render directly in a rich text editor.
+- summary must be one short teacher-facing sentence.
+- teacherMessage must be one short teacher-facing completion sentence.
+- If reference documents are missing or weak, silently fall back to the topic, objective, existing content, related records, and your general teaching knowledge of {subject_name}.
+- Keep the content anchored to {subject_name}. Do not drift into another subject.
+
+Return exactly this schema:
+{
+  "title": "...",
+  "contentHtml": "<h1>...</h1><p>...</p>",
+  "summary": "...",
+  "teacherMessage": "...",
+  "sourceDocumentsUsed": ["doc-name"]
+}"""
+    ).replace("{subject_name}", subject_name)
+
+    user_obj = {
+        "task": "Generate or revise a teacher workspace resource draft.",
+        "subject_name": _collapse_whitespace(request.subjectName or "Subject"),
+        "topic_title": _collapse_whitespace(request.topicTitle),
+        "unit_title": _collapse_whitespace(request.unitTitle or ""),
+        "grade_level": _collapse_whitespace(request.gradeLevel or ""),
+        "content_type": request.contentType,
+        "title": _collapse_whitespace(request.title or ""),
+        "objective": _collapse_whitespace(request.objective or ""),
+        "teacher_prompt": _trim_text(request.teacherPrompt or "", MAX_CONTEXT_CHARS),
+        "existing_content": _trim_text(request.existingContent or "", MAX_REFERENCE_PER_DOC_CHARS),
+        "variant": request.variant,
+        "related_records": _unique_strings(request.relatedRecords)[:6],
+        "reference_documents": prepared_docs.usable_documents,
+        "reference_fallback_used": prepared_docs.fallback_used,
+    }
+
+    raw = llm_client.generate(system_text, json.dumps(user_obj, ensure_ascii=False), max_new_tokens=900)
+    try:
+        candidate = _parse_json_candidate(raw)
+        if not isinstance(candidate, dict):
+            raise ValueError("Resource generation response is not an object")
+    except Exception as exc:
+        print(f"[resource-generation] first pass invalid output: {exc}; preview={_preview(raw)}")
+        retry_system = system_text + "\n\nReturn ONLY valid JSON matching the requested schema."
+        raw_retry = llm_client.generate(retry_system, json.dumps(user_obj, ensure_ascii=False), max_new_tokens=900)
+        try:
+            candidate = _parse_json_candidate(raw_retry)
+            if not isinstance(candidate, dict):
+                raise ValueError("Resource generation retry response is not an object")
+        except Exception as retry_exc:
+            print(f"[resource-generation] retry invalid output: {retry_exc}; preview={_preview(raw_retry)}")
+            return fallback
+
+    title = _collapse_whitespace(str(candidate.get("title") or fallback.title))
+    content_html = _sanitize_generated_html(str(candidate.get("contentHtml") or ""))
+    if not content_html:
+        return fallback
+    summary = _collapse_whitespace(str(candidate.get("summary") or fallback.summary))
+    teacher_message = _collapse_whitespace(str(candidate.get("teacherMessage") or fallback.teacherMessage))
+    source_used = _normalize_source_documents(candidate.get("sourceDocumentsUsed"), source_doc_names)
+
+    return GeneratedTeacherResource(
+        title=title or fallback.title,
+        contentHtml=content_html,
+        summary=summary or fallback.summary,
+        teacherMessage=teacher_message or fallback.teacherMessage,
+        sourceDocumentsUsed=source_used,
+        referenceFallbackUsed=prepared_docs.fallback_used,
+    )
+
+
+def _existing_question_type_mode(existing_questions: list[TeacherPracticeGenerationRequest | Any]) -> str | None:
+    if not existing_questions:
+        return None
+    has_mcq = False
+    has_structured = False
+    for question in existing_questions:
+        if not isinstance(question, dict):
+            question_type = getattr(question, "questionType", None) or getattr(question, "type", None)
+        else:
+            question_type = question.get("questionType") or question.get("type")
+        normalized = _collapse_whitespace(str(question_type or "")).lower().replace("_", "-")
+        if normalized == "multiple-choice":
+            has_mcq = True
+        elif normalized == "short-answer":
+            has_structured = True
+    if has_mcq and has_structured:
+        return "mixed"
+    if has_mcq:
+        return "multiple_choice"
+    if has_structured:
+        return "structured"
+    return None
+
+
+def _build_practice_description(request: TeacherPracticeGenerationRequest, question_count: int) -> str:
+    description = _collapse_whitespace(request.description or "")
+    if description:
+        return description
+    objective = _collapse_whitespace(request.objective or "")
+    practice_type = _collapse_whitespace(request.practiceType or "quiz").title()
+    topic = _collapse_whitespace(request.topicTitle)
+    grade_level = _collapse_whitespace(request.gradeLevel or "")
+    parts = [f"{practice_type} on {topic}."]
+    if objective:
+        parts.append(objective)
+    if grade_level:
+        parts.append(f"Designed for {grade_level}.")
+    parts.append(f"Includes {question_count} AI-generated question{'s' if question_count != 1 else ''}.")
+    return " ".join(parts)
+
+
+def _normalize_practice_questions(
+    generated_questions: list[GeneratedAssessmentQuestion],
+) -> list[GeneratedTeacherPracticeQuestion]:
+    normalized_questions: list[GeneratedTeacherPracticeQuestion] = []
+    for index, question in enumerate(generated_questions, start=1):
+        question_type = _collapse_whitespace(str(question.type or "short_answer")).lower().replace("_", "-")
+        is_objective = question_type in {"multiple-choice", "true-false"}
+        normalized_type = "multiple-choice" if is_objective else "short-answer"
+        options = question.options if normalized_type == "multiple-choice" else []
+        correct_answers = _unique_strings(question.correctAnswers)
+        marking_guide_payload = question.markingGuide
+        correct_answer = _collapse_whitespace(
+            str(
+                question.correctAnswer
+                or (marking_guide_payload.expectedAnswer if marking_guide_payload else "")
+                or ""
+            )
+        )
+        if normalized_type == "multiple-choice":
+            if not correct_answers and correct_answer:
+                correct_answers = [correct_answer]
+            if not correct_answer and correct_answers:
+                correct_answer = correct_answers[0]
+        else:
+            correct_answers = []
+            correct_answer = _collapse_whitespace(
+                str(
+                    (marking_guide_payload.expectedAnswer if marking_guide_payload else "")
+                    or question.correctAnswer
+                    or ""
+                )
+            )
+
+        rubric_items = marking_guide_payload.rubricItems if marking_guide_payload else []
+        marking_points = [
+            _collapse_whitespace(str(item.description or ""))
+            for item in rubric_items
+            if _collapse_whitespace(str(item.description or ""))
+        ]
+        marking_guide = "\n".join(marking_points) if marking_points else _collapse_whitespace(
+            str(
+                (marking_guide_payload.expectedAnswer if marking_guide_payload else "")
+                or question.explanation
+                or correct_answer
+                or ""
+            )
+        )
+
+        normalized_questions.append(
+            GeneratedTeacherPracticeQuestion(
+                id=f"ai-question-{index}",
+                prompt=_collapse_whitespace(str(question.text or f"Question {index}")),
+                type=normalized_type,
+                marks=max(1, int(question.maxMarks or question.points or 1)),
+                options=options,
+                correctAnswers=correct_answers,
+                correctAnswer=correct_answer,
+                markingGuide=marking_guide,
+            )
+        )
+    return normalized_questions
+
+
+def generate_teacher_practice(
+    request: TeacherPracticeGenerationRequest,
+    *,
+    llm_client,
+) -> GeneratedTeacherPractice:
+    existing_questions = [
+        {
+            "prompt": _collapse_whitespace(str(question.prompt or "")),
+            "questionType": question.questionType or question.type or "short-answer",
+            "marks": question.marks,
+            "options": _unique_strings(question.options),
+            "correctAnswers": _unique_strings(question.correctAnswers),
+            "correctAnswer": _collapse_whitespace(str(question.correctAnswer or "")),
+            "markingGuide": _collapse_whitespace(str(question.markingGuide or "")),
+        }
+        for question in request.existingQuestions
+        if _collapse_whitespace(str(question.prompt or ""))
+    ]
+    question_count = len(existing_questions) or request.numberOfQuestions
+    question_type_mode = _existing_question_type_mode(existing_questions) or request.questionTypeMode
+    context_parts = [
+        f"Generate a teacher-ready {request.practiceType} for the topic {request.topicTitle}.",
+        f"Grade level: {request.gradeLevel or 'Not specified'}.",
+        f"Learning objective: {request.objective or request.topicTitle}.",
+        f"Teacher direction: {request.teacherPrompt or 'Generate a clear, classroom-ready practice set.'}",
+        f"Practice description: {request.description or ''}",
+        f"Subject anchor: {request.subjectName or 'Use the declared subject only.'}",
+        "Return questions with correct answers and marking guidance suitable for the practice canvas.",
+    ]
+    if request.variant:
+        context_parts.append("Produce a distinct alternative version instead of repeating the current structure.")
+    if existing_questions:
+        context_parts.append(
+            "Existing questions to revise or use as style/context:\n" + json.dumps(existing_questions, ensure_ascii=False)
+        )
+
+    practice_attributes: dict[str, str] = {
+        request.topicTitle: request.objective or request.topicTitle,
+    }
+    if request.unitTitle:
+        practice_attributes[request.unitTitle] = request.practiceType
+    if request.subjectName:
+        practice_attributes[request.subjectName] = request.gradeLevel or request.practiceType
+
+    assessment_request = AssessmentGenerationRequest(
+        context="\n".join(part for part in context_parts if _collapse_whitespace(part)),
+        subjectName=request.subjectName,
+        difficulty=request.difficulty,
+        questionTypes=question_type_mode,
+        numberOfQuestions=question_count,
+        attributes=practice_attributes,
+        referenceDocuments=request.referenceDocuments,
+        tags=_unique_strings([request.topicTitle, request.objective or "", request.subjectName or ""]),
+    )
+    try:
+        generated_questions = generate_teacher_assessment_questions(assessment_request, llm_client=llm_client)
+    except AssessmentGenerationError as exc:
+        print(f"[practice-generation] using fallback questions: {exc}")
+        prepared_docs = _prepare_reference_documents(assessment_request.referenceDocuments)
+        generated_questions = _normalize_generated_questions(
+            [],
+            request=assessment_request,
+            prepared_docs=prepared_docs,
+        )
+    normalized_questions = _normalize_practice_questions(generated_questions)
+    source_documents_used = _unique_strings(
+        source_name
+        for question in generated_questions
+        for source_name in (question.sourceDocumentsUsed or [])
+    )
+    reference_fallback_used = any(question.referenceFallbackUsed for question in generated_questions)
+    title = _collapse_whitespace(
+        request.title or f"{request.topicTitle} {_collapse_whitespace(request.practiceType).title()}"
+    ).strip()
+    return GeneratedTeacherPractice(
+        title=title or f"{request.topicTitle} Practice",
+        description=_build_practice_description(request, len(normalized_questions)),
+        practiceType=request.practiceType,
+        difficulty=request.difficulty,
+        numberOfQuestions=len(normalized_questions),
+        questions=normalized_questions,
+        summary=f"Generated {len(normalized_questions)} practice question{'s' if len(normalized_questions) != 1 else ''} for {request.topicTitle}.",
+        teacherMessage="I generated a structured practice set with answers ready for the practice canvas.",
+        sourceDocumentsUsed=source_documents_used,
+        referenceFallbackUsed=reference_fallback_used,
+    )
+
+
 def generate_teacher_development_plan(
     request: PlanGenerationRequest,
     *,
@@ -892,12 +1284,15 @@ def _build_plan_generation_prompt(
     resolved: dict[str, Any],
     prepared_docs: ReferencePreparationResult,
 ) -> tuple[str, str]:
-    system_text = """You are an AI assistant that creates teacher-facing student development plans for Computer Science.
-Return JSON ONLY. No markdown. No prose outside JSON.
+    system_text = (
+        f"You are an AI assistant that creates teacher-facing student development plans for {resolved['subject_name']}.\n"
+        + """Return JSON ONLY. No markdown. No prose outside JSON.
 
 Rules:
 - Build the plan around the CRITICAL SKILLS ONLY.
 - Do not add unrelated skills or generic filler topics.
+- Default to ZIMSEC O Level high-school expectations unless the input explicitly requests another level.
+- Do not generate tertiary, university, or advanced specialist content.
 - Every step must directly address one or more critical skills from the input.
 - Use practical, teacher-actionable step titles.
 - Steps must use only these types: video, document, assessment, assignment, quiz, discussion.
@@ -906,7 +1301,8 @@ Rules:
 - progress must be 0 for a newly generated plan.
 - potentialOverall should be a realistic improvement target between 0 and 100.
 - eta should be the estimated number of days to execute the plan.
-- If reference documents are missing or unusable, silently fall back to the learner profile, critical skills, context, and your own subject knowledge.
+- If reference documents are missing or unusable, silently fall back to the learner profile, critical skills, context, and your own subject knowledge of {subject_name}.
+- Generate the plan only for {subject_name}. Use the declared subject to disambiguate broad skill names.
 
 Return exactly this schema:
 {
@@ -937,6 +1333,7 @@ Return exactly this schema:
   ],
   "subjectId": "..."
 }"""
+    ).replace("{subject_name}", resolved["subject_name"])
     user_obj = {
         "student_name": resolved["student_name"],
         "subject_name": resolved["subject_name"],
@@ -1029,7 +1426,7 @@ def _normalize_generated_plan(
         )
     )
     potential_overall = _clamp_percentage(payload.get("potentialOverall"), fallback=resolved["potential_overall"])
-    eta = max(1, int(round(_parse_float(payload.get("eta"), fallback=(len(normalized_steps) * 7)))))
+    eta = _parse_eta_days(payload.get("eta"), fallback=(len(normalized_steps) * 7))
     performance = _collapse_whitespace(str(payload.get("performance") or resolved["performance"])) or resolved["performance"]
 
     return GeneratedDevelopmentPlan(
@@ -1300,6 +1697,33 @@ def _parse_float(value: Any, *, fallback: float = 0.0) -> float:
         return float(text)
     except ValueError:
         return fallback
+
+
+def _parse_eta_days(value: Any, *, fallback: int) -> int:
+    if value is None:
+        return max(1, int(fallback))
+    if isinstance(value, (int, float)):
+        return max(1, int(round(float(value))))
+
+    text = str(value).strip().lower()
+    if not text:
+        return max(1, int(fallback))
+
+    direct_value = _parse_float(text, fallback=float("nan"))
+    if not math.isnan(direct_value):
+        return max(1, int(round(direct_value)))
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return max(1, int(fallback))
+
+    numeric_value = float(match.group(0))
+    if "week" in text:
+        numeric_value *= 7
+    elif "month" in text:
+        numeric_value *= 30
+
+    return max(1, int(round(numeric_value)))
 
 
 def _clamp_percentage(value: Any, fallback: float = 0.0) -> float:

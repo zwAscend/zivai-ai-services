@@ -56,9 +56,16 @@ def grade_with_rubric(
     rubric_items,
     student_answer: str,
     llm_client,
+    subject_name: str | None = None,
     retry_on_fail: bool = True,
 ):
-    system_text, user_text = build_rubric_grading_prompt(question_text, max_score, rubric_items, student_answer)
+    system_text, user_text = build_rubric_grading_prompt(
+        question_text,
+        max_score,
+        rubric_items,
+        student_answer,
+        subject_name=subject_name,
+    )
     parsed, raw, elapsed = _run_with_retry(system_text, user_text, llm_client, parse_rubric_grade, retry_on_fail)
     parsed.confidence = max(0.0, min(float(parsed.confidence), 1.0))
     print(f"[grade] rubric grading completed seconds={elapsed:.2f} items={len(parsed.items)}")
@@ -70,6 +77,7 @@ def grade_holistically(
     max_score: float,
     student_answer: str,
     llm_client,
+    subject_name: str | None = None,
     expected_answer: str | None = None,
     expected_points: list[str] | None = None,
     retry_on_fail: bool = True,
@@ -78,6 +86,7 @@ def grade_holistically(
         question_text,
         max_score,
         student_answer,
+        subject_name=subject_name,
         expected_answer=expected_answer,
         expected_points=expected_points,
     )

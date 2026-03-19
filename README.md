@@ -134,6 +134,8 @@ Important:
 - `GET /api/v1/dkt/mastery/<student_id>`
 - `POST /api/v1/asag/score`
 - `POST /api/v1/agents/teacher/assessment-generation`
+- `POST /api/v1/agents/teacher/resource-generation`
+- `POST /api/v1/agents/teacher/practice-generation`
 - `POST /api/v1/agents/teacher/plan-generation`
 - `POST /api/v1/agents/student/assessment`
 - `POST /api/v1/agents/ocr/general`
@@ -289,6 +291,129 @@ Behavior:
 - A marking guide is generated for every question.
 - If `referenceDocuments` are missing, empty, or unusable, the service falls back to the provided `context`, `attributes`, `tags`, and general Computer Science knowledge instead of failing.
 - The response already includes `rubricJson`-style data that can later be mapped into the shared LMS persistence layer.
+
+### Teacher Resource Generation
+
+Route:
+- `POST /api/v1/agents/teacher/resource-generation`
+
+Request body:
+
+```json
+{
+  "subjectName": "Computer Science",
+  "topicTitle": "Hardware and Software",
+  "unitTitle": "Hardware strand",
+  "gradeLevel": "Form 3",
+  "contentType": "resource",
+  "title": "Hardware and Software Notes",
+  "objective": "Help learners distinguish hardware and software clearly.",
+  "teacherPrompt": "Generate a clean lesson-ready draft with one worked example and one learner check.",
+  "existingContent": "",
+  "variant": false,
+  "relatedRecords": ["Intro to Computer Systems"],
+  "referenceDocuments": [
+    {
+      "documentName": "hardware_notes.pdf",
+      "markdown": "# Hardware and Software\\nHardware refers to the physical parts of a computer..."
+    }
+  ]
+}
+```
+
+Response body:
+
+```json
+{
+  "title": "Hardware and Software Notes",
+  "contentHtml": "<h1>Hardware and Software Notes</h1><p>...</p>",
+  "summary": "Generated a resource draft for Hardware and Software with a classroom-ready structure.",
+  "teacherMessage": "I generated a resource draft you can edit, expand, or publish.",
+  "sourceDocumentsUsed": ["hardware_notes.pdf"],
+  "referenceFallbackUsed": false
+}
+```
+
+Behavior:
+- Returns HTML ready for direct rendering in the teacher workspace editor.
+- Uses reference documents when available.
+- Falls back silently to topic/objective/context when references are weak or absent.
+
+### Teacher Practice Generation
+
+Route:
+- `POST /api/v1/agents/teacher/practice-generation`
+
+Request body:
+
+```json
+{
+  "subjectName": "Computer Science",
+  "topicTitle": "Hard Drives",
+  "unitTitle": "Hardware strand",
+  "gradeLevel": "Form 3",
+  "title": "Hard Drives Test",
+  "objective": "Check understanding of hard drive purpose and characteristics.",
+  "teacherPrompt": "Generate a balanced practice with both recall and application.",
+  "description": "",
+  "practiceType": "test",
+  "difficulty": "medium",
+  "questionTypeMode": "mixed",
+  "numberOfQuestions": 4,
+  "variant": false,
+  "relatedRecords": ["Hardware revision"],
+  "existingQuestions": [],
+  "referenceDocuments": []
+}
+```
+
+Response body:
+
+```json
+{
+  "title": "Hard Drives Test",
+  "description": "Test on Hard Drives. Includes 4 AI-generated questions.",
+  "practiceType": "test",
+  "difficulty": "medium",
+  "numberOfQuestions": 4,
+  "questions": [
+    {
+      "id": "ai-question-1",
+      "prompt": "What is the main purpose of a hard drive?",
+      "type": "multiple-choice",
+      "marks": 1,
+      "options": [
+        "To store data permanently",
+        "To cool the processor",
+        "To display graphics",
+        "To power the monitor"
+      ],
+      "correctAnswers": ["To store data permanently"],
+      "correctAnswer": "To store data permanently",
+      "markingGuide": "Award the mark for choosing the correct storage function."
+    },
+    {
+      "id": "ai-question-2",
+      "prompt": "Explain one difference between HDDs and SSDs.",
+      "type": "short-answer",
+      "marks": 4,
+      "options": [],
+      "correctAnswers": [],
+      "correctAnswer": "A correct answer should explain that HDDs use spinning magnetic disks while SSDs use flash memory and are generally faster.",
+      "markingGuide": "Explains how HDD storage works\nExplains how SSD storage works\nStates one valid performance or durability difference"
+    }
+  ],
+  "summary": "Generated 4 practice questions for Hard Drives.",
+  "teacherMessage": "I generated a structured practice set with answers ready for the practice canvas.",
+  "sourceDocumentsUsed": [],
+  "referenceFallbackUsed": true
+}
+```
+
+Behavior:
+- Returns structured questions that match the teacher workspace practice canvas.
+- Includes answers and marking guidance for rendering/editing.
+- Reuses the assessment generation path internally so practice and assessment generation stay aligned across the two backends.
 
 ### General OCR
 
