@@ -8,6 +8,7 @@ from asag_engine.agents.schema import (
     PlanGenerationRequest,
     StudentChallengeGenerationRequest,
     StudentTutorRequest,
+    TeacherPerformanceInsightRequest,
     TeacherPracticeGenerationRequest,
     TeacherResourceGenerationRequest,
 )
@@ -25,6 +26,7 @@ from asag_engine.agents.student_assessment import (
     extract_student_file_submission,
 )
 from asag_engine.agents.student_support import generate_student_challenge, generate_student_tutor_response
+from asag_engine.agents.teacher_performance import generate_teacher_performance_insight
 from asag_engine.grading.schema import QuestionGradePayload
 from asag_engine.grading.llm_client import build_llm_client
 from asag_engine.ocr.service import OcrConfigurationError, OcrProcessingError, OcrValidationError
@@ -127,6 +129,18 @@ def teacher_plan_generation():
         )
     except Exception as exc:
         return _error_response("Internal development plan generation error", str(exc), 500)
+
+
+@bp.post("/api/v1/agents/teacher/performance-insights")
+def teacher_performance_insights():
+    try:
+        payload = TeacherPerformanceInsightRequest.model_validate(request.get_json(silent=True) or {})
+        response = generate_teacher_performance_insight(payload, llm_client=_llm)
+        return jsonify(response.model_dump()), 200
+    except ValidationError as exc:
+        return _error_response("Invalid request body", exc.json(), 400)
+    except Exception as exc:
+        return _error_response("Internal teacher performance insight error", str(exc), 500)
 
 
 @bp.post("/api/v1/agents/student/assessment")

@@ -47,6 +47,7 @@ def create_app() -> Flask:
                 "/api/v1/agents/teacher/resource-generation [POST]",
                 "/api/v1/agents/teacher/practice-generation [POST]",
                 "/api/v1/agents/teacher/plan-generation [POST]",
+                "/api/v1/agents/teacher/performance-insights [POST]",
                 "/api/v1/agents/student/assessment [POST]",
                 "/api/v1/agents/student/tutor [POST]",
                 "/api/v1/agents/student/challenge-generation [POST]",
