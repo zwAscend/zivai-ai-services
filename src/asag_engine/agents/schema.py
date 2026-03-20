@@ -268,6 +268,75 @@ class PlanGenerationRequest(BaseModel):
     planPreferences: CanonicalPlanPreferences | None = None
 
 
+class TeacherPerformanceInsightSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    totalStudents: int = Field(default=0, ge=0)
+    studentsWithData: int = Field(default=0, ge=0)
+    supportCount: int = Field(default=0, ge=0)
+    onTrackCount: int = Field(default=0, ge=0)
+    averageScore: float = Field(default=0.0, ge=0, le=100)
+    filterLabel: str | None = None
+    strongestArea: str | None = None
+    weakestArea: str | None = None
+
+
+class TeacherPerformanceInsightMisconception(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1)
+    riskLevel: str = "watch"
+    learnerCount: int = Field(default=0, ge=0)
+    averageScore: float = Field(default=0.0, ge=0, le=100)
+
+
+class TeacherPerformanceInsightHeatmapCell(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    studentId: str = Field(..., min_length=1)
+    firstName: str = Field(..., min_length=1)
+    lastName: str = Field(..., min_length=1)
+    score: float | None = Field(default=None, ge=0, le=100)
+    status: str | None = None
+    performance: str | None = None
+    engagement: str | None = None
+    strength: str | None = None
+    focusArea: str | None = None
+    note: str | None = None
+
+
+class TeacherPerformanceInsightMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    role: Literal["user", "assistant"] = "user"
+    text: str = Field(..., min_length=1)
+
+
+class TeacherPerformanceInsightRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    teacherId: str | None = None
+    subjectId: str | None = None
+    subjectName: str | None = None
+    currentView: Literal["subject", "topic", "assessment"] = "subject"
+    filterLabel: str | None = None
+    latestMessage: str = Field(..., min_length=1)
+    summary: TeacherPerformanceInsightSummary | None = None
+    misconceptions: list[TeacherPerformanceInsightMisconception] = Field(default_factory=list)
+    heatmapCells: list[TeacherPerformanceInsightHeatmapCell] = Field(default_factory=list)
+    messages: list[TeacherPerformanceInsightMessage] = Field(default_factory=list)
+
+
+class TeacherPerformanceInsightResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    reply: str = Field(..., min_length=1)
+    suggestedNextAction: str | None = None
+    focusStudents: list[str] = Field(default_factory=list)
+    focusTopics: list[str] = Field(default_factory=list)
+
+
 class GeneratedPlanSubskill(BaseModel):
     name: str = Field(..., min_length=1)
     score: int = Field(..., ge=0, le=100)

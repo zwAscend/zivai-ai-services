@@ -30,6 +30,23 @@ MAX_REFERENCE_DOCUMENTS = 3
 MAX_REFERENCE_TOTAL_CHARS = 4000
 MAX_REFERENCE_PER_DOC_CHARS = 1600
 MAX_CONTEXT_CHARS = 1800
+_QUESTION_COUNT_WORDS = {
+    "a": 1,
+    "an": 1,
+    "another": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
 
 
 class AssessmentGenerationError(Exception):
@@ -724,16 +741,105 @@ def _sanitize_generated_html(raw_html: str) -> str:
     return html_value.strip()
 
 
+def _coerce_candidate_html(candidate: dict[str, Any]) -> str:
+    for key in ("contentHtml", "content", "html", "body", "draftHtml", "draft", "resourceHtml"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            return _sanitize_generated_html(value)
+        if isinstance(value, list):
+            parts = [_collapse_whitespace(str(item)) for item in value if _collapse_whitespace(str(item))]
+            if parts:
+                return _sanitize_generated_html("".join(f"<p>{html.escape(part)}</p>" for part in parts))
+
+    sections = candidate.get("sections")
+    if isinstance(sections, list):
+        blocks: list[str] = []
+        for section in sections:
+            if isinstance(section, dict):
+                heading = _collapse_whitespace(str(section.get("heading") or section.get("title") or ""))
+                body = _collapse_whitespace(str(section.get("content") or section.get("text") or ""))
+                if heading:
+                    blocks.append(f"<h2>{html.escape(heading)}</h2>")
+                if body:
+                    blocks.append(f"<p>{html.escape(body)}</p>")
+            else:
+                text = _collapse_whitespace(str(section))
+                if text:
+                    blocks.append(f"<p>{html.escape(text)}</p>")
+        if blocks:
+            return _sanitize_generated_html("".join(blocks))
+
+    return ""
+
+
+def _coerce_candidate_text(candidate: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = candidate.get(key)
+        if isinstance(value, str):
+            text = _collapse_whitespace(value)
+            if text:
+                return text
+    return ""
+
+
+_GENERIC_FOCUS_SUFFIXES = (
+    " resource",
+    " resources",
+    " draft",
+    " content",
+    " notes",
+    " lesson",
+    " lesson notes",
+    " practice",
+    " quiz",
+    " test",
+    " exam",
+    " assignment",
+    " worksheet",
+)
+
+
+def _strip_generic_focus_suffixes(value: str) -> str:
+    text = _collapse_whitespace(value)
+    if not text:
+        return ""
+    previous = None
+    while previous != text:
+        previous = text
+        lowered = text.lower()
+        for suffix in _GENERIC_FOCUS_SUFFIXES:
+            if lowered.endswith(suffix):
+                text = text[: -len(suffix)].strip(" -:|")
+                break
+    return _collapse_whitespace(text)
+
+
+def _resolve_generation_focus(topic_title: str, title: str | None) -> str:
+    topic = _collapse_whitespace(topic_title)
+    title_text = _strip_generic_focus_suffixes(title or "")
+    if not title_text:
+        return topic
+    if title_text.lower() == topic.lower():
+        return topic
+    return title_text
+
+
 def _fallback_resource_html(
     request: TeacherResourceGenerationRequest,
     source_doc_names: list[str],
     fallback_used: bool,
 ) -> GeneratedTeacherResource:
-    title = _collapse_whitespace(request.title or f"{request.topicTitle} {request.contentType.title()}").strip()
-    objective = _collapse_whitespace(request.objective or f"Build mastery in {request.topicTitle}")
+    focus_area = _resolve_generation_focus(request.topicTitle, request.title)
+    title = _collapse_whitespace(request.title or f"{focus_area} {request.contentType.title()}").strip()
+    objective = _collapse_whitespace(request.objective or f"Build mastery in {focus_area}")
     teacher_prompt = _collapse_whitespace(request.teacherPrompt or "Generate a clear, classroom-ready draft.")
     subject_name = _collapse_whitespace(request.subjectName or "the subject")
     grade_level = _collapse_whitespace(request.gradeLevel or "Form 4")
+    focus_line = (
+        f"<p><strong>Subtopic focus:</strong> {html.escape(focus_area)}</p>"
+        if focus_area.lower() != _collapse_whitespace(request.topicTitle).lower()
+        else ""
+    )
     variant_note = (
         "<p><strong>Variation:</strong> This version uses a slightly different explanation flow and learner task structure.</p>"
         if request.variant
@@ -743,15 +849,16 @@ def _fallback_resource_html(
 <h1>{html.escape(title)}</h1>
 <p><strong>Subject:</strong> {html.escape(subject_name)} | <strong>Grade level:</strong> {html.escape(grade_level)}</p>
 <p><strong>Topic:</strong> {html.escape(request.topicTitle)}</p>
+{focus_line}
 <p><strong>Learning objective:</strong> {html.escape(objective)}</p>
 {variant_note}
 <h2>Overview</h2>
-<p>This resource introduces <strong>{html.escape(request.topicTitle)}</strong> using clear classroom language and direct teaching points that the teacher can adapt during instruction.</p>
+<p>This resource focuses on <strong>{html.escape(focus_area)}</strong>{'' if focus_area.lower() == _collapse_whitespace(request.topicTitle).lower() else f' within {html.escape(request.topicTitle)}'} using clear classroom language and direct teaching points that the teacher can adapt during instruction.</p>
 <h2>Teach It</h2>
-<p>Start by defining the key idea, then connect it to one practical example drawn from {html.escape(subject_name)}. Keep the explanation concise and check understanding after each section.</p>
+<p>Start by defining the key idea in <strong>{html.escape(focus_area)}</strong>, then connect it to one practical example drawn from {html.escape(subject_name)}. Keep the explanation concise and check understanding after each section.</p>
 <ul>
   <li>Explain the main concept in one clear paragraph.</li>
-  <li>Use one worked example linked to the topic.</li>
+  <li>Use one worked example linked to {html.escape(focus_area)}.</li>
   <li>Highlight one common misconception learners may have.</li>
 </ul>
 <h2>Learner Check</h2>
@@ -767,7 +874,7 @@ def _fallback_resource_html(
     return GeneratedTeacherResource(
         title=title,
         contentHtml=_sanitize_generated_html(content_html),
-        summary=f"Generated a {request.contentType} draft for {request.topicTitle} with a classroom-ready structure.",
+        summary=f"Generated a {request.contentType} draft focused on {focus_area}.",
         teacherMessage=(
             "I generated a resource draft you can edit, expand, or publish."
             if not fallback_used
@@ -786,6 +893,7 @@ def generate_teacher_resource(
     prepared_docs = _prepare_reference_documents(request.referenceDocuments)
     source_doc_names = [doc["documentName"] for doc in prepared_docs.usable_documents]
     fallback = _fallback_resource_html(request, source_doc_names, prepared_docs.fallback_used)
+    focus_area = _resolve_generation_focus(request.topicTitle, request.title)
 
     subject_name = _collapse_whitespace(request.subjectName or "the requested subject")
     system_text = (
@@ -799,6 +907,9 @@ Rules:
 - Default to ZIMSEC O Level high-school expectations unless the input explicitly requests another level.
 - Do not generate tertiary, university, or advanced specialist content.
 - The content should be ready to render directly in a rich text editor.
+- Treat topic_title as the umbrella topic.
+- If focus_area or title is narrower than topic_title, center the content on that narrower subtopic while staying under the umbrella topic.
+- If teacher_prompt names a narrower subtopic than topic_title, follow that narrower focus.
 - summary must be one short teacher-facing sentence.
 - teacherMessage must be one short teacher-facing completion sentence.
 - If reference documents are missing or weak, silently fall back to the topic, objective, existing content, related records, and your general teaching knowledge of {subject_name}.
@@ -818,6 +929,7 @@ Return exactly this schema:
         "task": "Generate or revise a teacher workspace resource draft.",
         "subject_name": _collapse_whitespace(request.subjectName or "Subject"),
         "topic_title": _collapse_whitespace(request.topicTitle),
+        "focus_area": focus_area,
         "unit_title": _collapse_whitespace(request.unitTitle or ""),
         "grade_level": _collapse_whitespace(request.gradeLevel or ""),
         "content_type": request.contentType,
@@ -848,12 +960,19 @@ Return exactly this schema:
             print(f"[resource-generation] retry invalid output: {retry_exc}; preview={_preview(raw_retry)}")
             return fallback
 
-    title = _collapse_whitespace(str(candidate.get("title") or fallback.title))
-    content_html = _sanitize_generated_html(str(candidate.get("contentHtml") or ""))
+    title = _coerce_candidate_text(candidate, "title", "resourceTitle") or fallback.title
+    content_html = _coerce_candidate_html(candidate)
+    summary = _coerce_candidate_text(candidate, "summary", "description", "message") or fallback.summary
+    teacher_message = _coerce_candidate_text(candidate, "teacherMessage", "message", "note") or fallback.teacherMessage
     if not content_html:
-        return fallback
-    summary = _collapse_whitespace(str(candidate.get("summary") or fallback.summary))
-    teacher_message = _collapse_whitespace(str(candidate.get("teacherMessage") or fallback.teacherMessage))
+        return GeneratedTeacherResource(
+            title=title or fallback.title,
+            contentHtml=fallback.contentHtml,
+            summary=summary or fallback.summary,
+            teacherMessage=teacher_message or fallback.teacherMessage,
+            sourceDocumentsUsed=fallback.sourceDocumentsUsed,
+            referenceFallbackUsed=prepared_docs.fallback_used,
+        )
     source_used = _normalize_source_documents(candidate.get("sourceDocumentsUsed"), source_doc_names)
 
     return GeneratedTeacherResource(
@@ -890,7 +1009,47 @@ def _existing_question_type_mode(existing_questions: list[TeacherPracticeGenerat
     return None
 
 
-def _build_practice_description(request: TeacherPracticeGenerationRequest, question_count: int) -> str:
+def _parse_question_count_token(token: str) -> int | None:
+    normalized = _collapse_whitespace(token).lower()
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return max(1, int(normalized))
+    return _QUESTION_COUNT_WORDS.get(normalized)
+
+
+def _resolve_requested_practice_question_count(
+    teacher_prompt: str | None,
+    *,
+    existing_count: int,
+    requested_count: int | None,
+) -> tuple[int, int]:
+    base_count = max(1, requested_count or 0, existing_count)
+    prompt_text = _collapse_whitespace(teacher_prompt or "").lower()
+    if not prompt_text:
+        return base_count, 0
+
+    additive_patterns = (
+        r"\b(?:add|append|include|create|generate)\s+(?P<count>a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+(?:more|additional|extra|new)?\s*questions?\b",
+        r"\b(?P<count>a|an|another|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+(?:more|additional|extra|new)\s+questions?\b",
+    )
+    for pattern in additive_patterns:
+        match = re.search(pattern, prompt_text)
+        if not match:
+            continue
+        parsed_count = _parse_question_count_token(match.group("count") or "")
+        if not parsed_count:
+            continue
+        return max(base_count, existing_count + parsed_count), parsed_count
+
+    return base_count, 0
+
+
+def _build_practice_description(
+    request: TeacherPracticeGenerationRequest,
+    question_count: int,
+    focus_area: str,
+) -> str:
     description = _collapse_whitespace(request.description or "")
     if description:
         return description
@@ -898,7 +1057,10 @@ def _build_practice_description(request: TeacherPracticeGenerationRequest, quest
     practice_type = _collapse_whitespace(request.practiceType or "quiz").title()
     topic = _collapse_whitespace(request.topicTitle)
     grade_level = _collapse_whitespace(request.gradeLevel or "")
-    parts = [f"{practice_type} on {topic}."]
+    if focus_area.lower() != topic.lower():
+        parts = [f"{practice_type} on {focus_area} in {topic}."]
+    else:
+        parts = [f"{practice_type} on {topic}."]
     if objective:
         parts.append(objective)
     if grade_level:
@@ -975,6 +1137,7 @@ def generate_teacher_practice(
     *,
     llm_client,
 ) -> GeneratedTeacherPractice:
+    focus_area = _resolve_generation_focus(request.topicTitle, request.title)
     existing_questions = [
         {
             "prompt": _collapse_whitespace(str(question.prompt or "")),
@@ -988,15 +1151,21 @@ def generate_teacher_practice(
         for question in request.existingQuestions
         if _collapse_whitespace(str(question.prompt or ""))
     ]
-    question_count = len(existing_questions) or request.numberOfQuestions
+    question_count, additive_question_count = _resolve_requested_practice_question_count(
+        request.teacherPrompt,
+        existing_count=len(existing_questions),
+        requested_count=request.numberOfQuestions,
+    )
     question_type_mode = _existing_question_type_mode(existing_questions) or request.questionTypeMode
     context_parts = [
         f"Generate a teacher-ready {request.practiceType} for the topic {request.topicTitle}.",
+        f"Immediate subtopic or lesson focus: {focus_area}.",
         f"Grade level: {request.gradeLevel or 'Not specified'}.",
-        f"Learning objective: {request.objective or request.topicTitle}.",
+        f"Learning objective: {request.objective or focus_area}.",
         f"Teacher direction: {request.teacherPrompt or 'Generate a clear, classroom-ready practice set.'}",
         f"Practice description: {request.description or ''}",
         f"Subject anchor: {request.subjectName or 'Use the declared subject only.'}",
+        f"Every question must primarily assess {focus_area} while staying within the broader topic {request.topicTitle}.",
         "Return questions with correct answers and marking guidance suitable for the practice canvas.",
     ]
     if request.variant:
@@ -1005,10 +1174,17 @@ def generate_teacher_practice(
         context_parts.append(
             "Existing questions to revise or use as style/context:\n" + json.dumps(existing_questions, ensure_ascii=False)
         )
+        if additive_question_count > 0:
+            context_parts.append(
+                f"Keep the existing {len(existing_questions)} question(s) unless the teacher explicitly asked to revise them. "
+                f"Return the full updated set with {question_count} question(s) total, including {additive_question_count} newly added question(s)."
+            )
 
     practice_attributes: dict[str, str] = {
-        request.topicTitle: request.objective or request.topicTitle,
+        focus_area: request.objective or focus_area,
     }
+    if focus_area.lower() != _collapse_whitespace(request.topicTitle).lower():
+        practice_attributes[request.topicTitle] = request.practiceType
     if request.unitTitle:
         practice_attributes[request.unitTitle] = request.practiceType
     if request.subjectName:
@@ -1022,7 +1198,7 @@ def generate_teacher_practice(
         numberOfQuestions=question_count,
         attributes=practice_attributes,
         referenceDocuments=request.referenceDocuments,
-        tags=_unique_strings([request.topicTitle, request.objective or "", request.subjectName or ""]),
+        tags=_unique_strings([focus_area, request.topicTitle, request.objective or "", request.subjectName or ""]),
     )
     try:
         generated_questions = generate_teacher_assessment_questions(assessment_request, llm_client=llm_client)
@@ -1042,17 +1218,20 @@ def generate_teacher_practice(
     )
     reference_fallback_used = any(question.referenceFallbackUsed for question in generated_questions)
     title = _collapse_whitespace(
-        request.title or f"{request.topicTitle} {_collapse_whitespace(request.practiceType).title()}"
+        request.title or f"{focus_area} {_collapse_whitespace(request.practiceType).title()}"
     ).strip()
     return GeneratedTeacherPractice(
-        title=title or f"{request.topicTitle} Practice",
-        description=_build_practice_description(request, len(normalized_questions)),
+        title=title or f"{focus_area} Practice",
+        description=_build_practice_description(request, len(normalized_questions), focus_area),
         practiceType=request.practiceType,
         difficulty=request.difficulty,
         numberOfQuestions=len(normalized_questions),
         questions=normalized_questions,
-        summary=f"Generated {len(normalized_questions)} practice question{'s' if len(normalized_questions) != 1 else ''} for {request.topicTitle}.",
-        teacherMessage="I generated a structured practice set with answers ready for the practice canvas.",
+        summary=f"Generated {len(normalized_questions)} practice question{'s' if len(normalized_questions) != 1 else ''} focused on {focus_area}.",
+        teacherMessage=(
+            f"I updated the practice set to {len(normalized_questions)} question"
+            f"{'s' if len(normalized_questions) != 1 else ''} with answers ready for the practice canvas."
+        ),
         sourceDocumentsUsed=source_documents_used,
         referenceFallbackUsed=reference_fallback_used,
     )
